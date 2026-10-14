@@ -1,0 +1,274 @@
+import html
+import json
+from datetime import datetime, timedelta, timezone
+from datetime import time as dtime
+from zoneinfo import ZoneInfo
+
+import requests
+import yfinance as yf
+
+from config import POLY_KEY
+from data import money, num, pct
+
+CHART_GUIDE = """HOW TO READ THE CHART NUMBERS:
+- Support is a price where buyers stepped in before and the stock bounced. More touches means a stronger level.
+- Resistance is a price where sellers stepped in before and the stock turned down.
+- When price falls below a support level, that level often acts as resistance afterward.
+- The 50-day and 200-day averages are the average closing price over that many days. Price above both is a sign of an uptrend.
+- RSI runs from 0 to 100 and measures how fast the price has moved. Above 70 is often called overbought. Below 30 is often called oversold.
+- Volume above its 20-day average means more trading than usual, which makes a move more meaningful.
+- All of these describe past behavior. They are not predictions."""
+
+
+def poly_candles(ticker, mult, span, start, end):
+    url = f"https://api.polygon.io/v2/aggs/ticker/{ticker}/range/{mult}/{span}/{start}/{end}"
+    r = requests.get(
+        url,
+        params={"adjusted": "true", "sort": "asc", "limit": 50000},
+        headers={"Authorization": f"Bearer {POLY_KEY}"},
+        timeout=30,
+    )
+    if r.status_code != 200:
+        raise ValueError(f"Polygon returned HTTP {r.status_code} for {ticker} {mult}-{span} candles.")
+    rows = r.json().get("results") or []
+    return [
+        {"t": x["t"] // 1000, "o": x["o"], "h": x["h"], "l": x["l"], "c": x["c"], "v": x["v"]}
+        for x in rows
+    ]
+
+
+def candle_date(c):
+    return datetime.fromtimestamp(c["t"], timezone.utc).date()
+
+
+def add_recent_days(ticker, daily):
+    # The free Polygon plan runs a day behind, so add any newer days from Yahoo.
+    try:
+        stock = yf.Ticker(ticker)
+        recent = stock.history(period="5d", interval="1d", auto_adjust=True)
+    except Exception:
+        return daily, False
+    last = candle_date(daily[-1])
+    ny_today = datetime.now(ZoneInfo("America/New_York")).date()
+    added = False
+    for idx, row in recent.iterrows():
+        d = idx.date()
+        o, h, l, c, v = (row[k] for k in ("Open", "High", "Low", "Close", "Volume"))
+        if d > last and c != c and d == ny_today:
+            # Yahoo sometimes has today's row before its open/close are filled in.
+            # Use the latest price so the chart is not a day behind.
+            try:
+                c = float(stock.fast_info["last_price"])
+            except Exception:
+                continue
+            o = o if o == o else c
+            h = max(h, c) if h == h else max(o, c)
+            l = min(l, c) if l == l else min(o, c)
+        if d > last and c == c:   # skips empty rows
+            stamp = int(datetime(d.year, d.month, d.day, 12, tzinfo=timezone.utc).timestamp())
+            daily.append({
+                "t": stamp, "o": float(o), "h": float(h),
+                "l": float(l), "c": float(c), "v": float(v) if v == v else 0.0,
+            })
+            added = True
+    return daily, added
+
+
+def sma(values, n):
+    return sum(values[-n:]) / n if len(values) >= n else None
+
+
+def sma_series(values, n):
+    out = []
+    for i in range(len(values)):
+        out.append(sum(values[i - n + 1:i + 1]) / n if i >= n - 1 else None)
+    return out
+
+
+def rsi(closes, n=14):
+    if len(closes) < n + 1:
+        return None
+    gains = losses = 0.0
+    for i in range(1, n + 1):
+        ch = closes[i] - closes[i - 1]
+        gains += max(ch, 0)
+        losses += max(-ch, 0)
+    avg_gain, avg_loss = gains / n, losses / n
+    for i in range(n + 1, len(closes)):
+        ch = closes[i] - closes[i - 1]
+        avg_gain = (avg_gain * (n - 1) + max(ch, 0)) / n
+        avg_loss = (avg_loss * (n - 1) + max(-ch, 0)) / n
+    if avg_loss == 0:
+        return 100.0
+    return 100 - 100 / (1 + avg_gain / avg_loss)
+
+
+def find_levels(daily, price, window=5, tol=0.015):
+    # A pivot is a day whose high (or low) is the most extreme within 5 days on each side.
+    pivots = []
+    for i in range(window, len(daily) - window):
+        seg = daily[i - window:i + window + 1]
+        if daily[i]["h"] == max(x["h"] for x in seg):
+            pivots.append(daily[i]["h"])
+        if daily[i]["l"] == min(x["l"] for x in seg):
+            pivots.append(daily[i]["l"])
+    pivots.sort()
+
+    # Pivots within 1.5% of each other count as the same level.
+    clusters = []
+    for p in pivots:
+        if clusters and abs(p - clusters[-1][0]) / clusters[-1][0] <= tol:
+            clusters[-1].append(p)
+        else:
+            clusters.append([p])
+    levels = [(sum(c) / len(c), len(c)) for c in clusters if len(c) >= 2]
+
+    supports = sorted([l for l in levels if l[0] < price], key=lambda l: -l[0])[:2]
+    resistances = sorted([l for l in levels if l[0] > price], key=lambda l: l[0])[:2]
+    return supports, resistances
+
+
+def get_chart(ticker, today):
+    daily = poly_candles(ticker, 1, "day", today - timedelta(days=730), today)
+    if len(daily) < 60:
+        raise ValueError(f"Not enough price history for {ticker}.")
+    daily, added = add_recent_days(ticker, daily)
+
+    closes = [c["c"] for c in daily]
+    year = daily[-252:]
+    price = closes[-1]
+    last_day = candle_date(daily[-1])
+    source = "Yahoo Finance" if added else "Polygon"
+    stale = "" if last_day >= today - timedelta(days=1) else " WARNING: this price may be out of date."
+
+    # The latest day is only partial if it is today in New York and the market has not closed yet.
+    ny_now = datetime.now(ZoneInfo("America/New_York"))
+    is_partial = last_day == ny_now.date() and ny_now.weekday() < 5 and ny_now.time() < dtime(16, 0)
+    partial = " (may be a partial day)" if is_partial else ""
+
+    s50, s200 = sma(closes, 50), sma(closes, 200)
+    r = rsi(closes)
+    vol20 = sum(c["v"] for c in daily[-21:-1]) / 20
+    last_vol = daily[-1]["v"]
+    supports, resistances = find_levels(year, price)
+    high52, low52 = max(c["h"] for c in year), min(c["l"] for c in year)
+    # With no level touched 2+ times, fall back to the 52-week high or low. None marks the fallback.
+    if not resistances:
+        resistances = [(high52, None)]
+    if not supports:
+        supports = [(low52, None)]
+
+    if s50 and s200 and price > s50 > s200:
+        trend = "Uptrend: price is above the 50-day average, and the 50-day is above the 200-day."
+    elif s50 and s200 and price < s50 < s200:
+        trend = "Downtrend: price is below the 50-day average, and the 50-day is below the 200-day."
+    elif s50 and s200 and s50 > s200 and price < s50:
+        trend = "Pullback: the 50-day average is above the 200-day, but price has dropped below the 50-day."
+    else:
+        trend = "Mixed: price and the two averages do not line up in one direction."
+
+    def change(days):
+        return None if len(closes) <= days else closes[-1] / closes[-1 - days] - 1
+
+    def fmt(levels, fallback):
+        return "; ".join(
+            f"${p:,.2f} ({fallback})" if n is None else f"${p:,.2f} (touched {n} times)"
+            for p, n in levels
+        )
+
+    lines = [
+        f"Latest price: ${price:,.2f} (most recent price on {last_day:%b %d}, from {source}).{stale}",
+        f"Candles run through: {last_day:%b %d, %Y}",
+        f"Trend: {trend}",
+        f"50-day average: {money(s50)}",
+        f"200-day average: {money(s200)}",
+        f"Change over 1 day: {pct(change(1))}",
+        f"Change over 1 month: {pct(change(21))}",
+        f"Change over 3 months: {pct(change(63))}",
+        f"52-week high: ${high52:,.2f}",
+        f"52-week low: ${low52:,.2f}",
+        f"Nearest support below price: {fmt(supports, '52-week low')}",
+        f"Nearest resistance above price: {fmt(resistances, '52-week high')}",
+        f"RSI (14-day): {num(r)}",
+        f"Latest day's volume vs 20-day average: {last_vol / vol20:.2f}x{partial}",
+    ]
+    return {
+        "text": "\n".join(lines),
+        "daily": daily,
+        "supports": supports,
+        "resistances": resistances,
+    }
+
+
+def chart_html(ticker, chart):
+    daily = chart["daily"]
+    closes = [c["c"] for c in daily]
+    ma50, ma200 = sma_series(closes, 50), sma_series(closes, 200)
+    show = range(max(0, len(daily) - 250), len(daily))
+
+    def day(c):
+        return candle_date(c).strftime("%Y-%m-%d")
+
+    candles = [{"time": day(daily[i]), "open": daily[i]["o"], "high": daily[i]["h"],
+                "low": daily[i]["l"], "close": daily[i]["c"]} for i in show]
+    volumes = [{"time": day(daily[i]), "value": daily[i]["v"],
+                "color": "rgba(46,158,79,0.4)" if daily[i]["c"] >= daily[i]["o"] else "rgba(224,72,72,0.4)"}
+               for i in show]
+    line50 = [{"time": day(daily[i]), "value": ma50[i]} for i in show if ma50[i] is not None]
+    line200 = [{"time": day(daily[i]), "value": ma200[i]} for i in show if ma200[i] is not None]
+    levels = (
+        [{"price": round(p, 2), "color": "#2e9e4f", "title": "Support" if n else "52-week low"}
+         for p, n in chart["supports"]]
+        + [{"price": round(p, 2), "color": "#e04848", "title": "Resistance" if n else "52-week high"}
+           for p, n in chart["resistances"]]
+    )
+    box = f"chart_{ticker}_{len(daily)}"
+
+    return f"""
+    <div style='max-width:760px;font-family:sans-serif;margin-top:14px'>
+      <div style='font-weight:700;margin-bottom:4px'>{html.escape(ticker)} daily candles, last 12 months</div>
+      <div style='font-size:12px;opacity:.7;margin-bottom:6px'>
+        Blue = 50-day average. Orange = 200-day average. Dashed green = support. Dashed red = resistance.
+        Scroll to zoom, drag to move.
+      </div>
+      <div id='{box}' style='width:100%;height:420px;background:#ffffff'></div>
+    </div>
+    <script>
+    (function() {{
+      function draw() {{
+        var el = document.getElementById('{box}');
+        var chart = LightweightCharts.createChart(el, {{
+          width: el.clientWidth || 740, height: 420,
+          layout: {{ background: {{ color: '#ffffff' }}, textColor: '#222222' }},
+          grid: {{ vertLines: {{ color: '#eeeeee' }}, horzLines: {{ color: '#eeeeee' }} }},
+          rightPriceScale: {{ borderVisible: false }},
+          timeScale: {{ borderVisible: false }}
+        }});
+        var candles = chart.addCandlestickSeries({{
+          upColor: '#2e9e4f', downColor: '#e04848', borderVisible: false,
+          wickUpColor: '#2e9e4f', wickDownColor: '#e04848'
+        }});
+        candles.setData({json.dumps(candles)});
+        var vol = chart.addHistogramSeries({{ priceFormat: {{ type: 'volume' }}, priceScaleId: '' }});
+        vol.priceScale().applyOptions({{ scaleMargins: {{ top: 0.82, bottom: 0 }} }});
+        vol.setData({json.dumps(volumes)});
+        var a = chart.addLineSeries({{ color: '#2962ff', lineWidth: 1, priceLineVisible: false, lastValueVisible: false }});
+        a.setData({json.dumps(line50)});
+        var b = chart.addLineSeries({{ color: '#f59f00', lineWidth: 1, priceLineVisible: false, lastValueVisible: false }});
+        b.setData({json.dumps(line200)});
+        {json.dumps(levels)}.forEach(function(l) {{
+          candles.createPriceLine({{ price: l.price, color: l.color, lineWidth: 1, lineStyle: 2,
+                                     axisLabelVisible: true, title: l.title }});
+        }});
+        chart.timeScale().fitContent();
+      }}
+      if (window.LightweightCharts) {{ draw(); }}
+      else {{
+        var s = document.createElement('script');
+        s.src = 'https://unpkg.com/lightweight-charts@4.2.0/dist/lightweight-charts.standalone.production.js';
+        s.onload = draw;
+        document.head.appendChild(s);
+      }}
+    }})();
+    </script>
+    """
