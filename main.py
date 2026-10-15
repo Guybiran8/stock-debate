@@ -14,7 +14,7 @@ REPORT_FILE = Path(__file__).parent / "report.html"
 REPORTS_DIR = Path(__file__).parent / "reports"
 
 
-def analyze(ticker, horizon):
+def analyze(ticker, horizon, open_browser=True):
     label = "Short-term trade" if horizon == "short" else "Long-term hold"
     print(f"Working on {ticker} ({label}). This takes a minute or two.\n")
 
@@ -62,9 +62,12 @@ def analyze(ticker, horizon):
 
     # Also keep a copy of every run, so older reports are not lost.
     REPORTS_DIR.mkdir(exist_ok=True)
-    (REPORTS_DIR / f"{ticker}-{horizon}-{today}.html").write_text(full_html, encoding="utf-8")
+    saved = REPORTS_DIR / f"{ticker}-{horizon}-{today}.html"
+    saved.write_text(full_html, encoding="utf-8")
 
-    webbrowser.open(REPORT_FILE.as_uri())
+    if open_browser:
+        webbrowser.open(REPORT_FILE.as_uri())
+    return saved
 
 
 if __name__ == "__main__":

@@ -2,9 +2,11 @@
 Uses made-up prices, so it needs no network and spends nothing."""
 import os
 import random
+import re
 import tempfile
 import unittest
 from datetime import date, timedelta
+from pathlib import Path
 
 # chart.py imports config.py, which needs these to exist. No API call is made.
 for key in ("ANTHROPIC_API_KEY", "OPENAI_API_KEY", "XAI_API_KEY", "POLYGON_API_KEY"):
@@ -132,6 +134,63 @@ class WatchlistTest(unittest.TestCase):
                 if m["risk_floored"]:
                     self.assertAlmostEqual(m["to_risk"], m["atr"] / m["price"])
                     self.assertLess((m["price"] - m["risk"]) / m["price"], m["to_risk"])
+
+    def _top(self, ticker, room, rs60=0.1):
+        return {"ticker": ticker, "group": "Top candidates", "metrics": perfect_metrics(room=room, rs60=rs60)}
+
+    def test_auto_reports_best_first_and_max_two_per_day(self):
+        results = [self._top("LOW", 1.6), self._top("HIGH", 4.0), self._top("MID", 2.5),
+                   {"ticker": "W", "group": "Watch closely", "metrics": perfect_metrics(room=9.0)}]
+        ran = []
+
+        def runner(t):
+            ran.append(t)
+            return Path(f"{t}-short-{TODAY}.html")
+
+        with tempfile.TemporaryDirectory() as d:
+            out = w.auto_reports(results, TODAY, runner, log_dir=d)
+            self.assertEqual(ran, ["HIGH", "MID"])
+            self.assertEqual([o for _, o, _ in out], ["report run", "report run", "not run: daily limit of 2 reached"])
+            # A second run the same day starts nothing new.
+            out = w.auto_reports(results, TODAY, runner, log_dir=d)
+            self.assertEqual(ran, ["HIGH", "MID"])
+            self.assertEqual([o for _, o, _ in out][:2], ["already run today", "already run today"])
+
+    def test_auto_reports_failure_counts_and_zero_top_runs_nothing(self):
+        def boom(t):
+            raise RuntimeError("network down")
+
+        with tempfile.TemporaryDirectory() as d:
+            out = w.auto_reports([self._top("A", 3.0), self._top("B", 2.0), self._top("C", 1.8)], TODAY, boom, log_dir=d)
+            self.assertEqual([o for _, o, _ in out][:2], ["report failed: RuntimeError: network down"] * 2)
+            self.assertEqual(out[2][1], "not run: daily limit of 2 reached")
+        with tempfile.TemporaryDirectory() as d:
+            self.assertEqual(w.auto_reports([], TODAY, boom, log_dir=d), [])
+        page = w.build_page([], [], TODAY, w.auto_section([], [], True))
+        self.assertIn("0 Top candidates today, so no full reports were run.", page)
+
+    def test_publish_adds_cards_without_touching_other_text(self):
+        page = ('<!DOCTYPE html>\n<html>\n<body>\n  <main class="wrap">\n    <h1>Example reports</h1>\n'
+                '    <ul class="cards">\n      <li>\n        <a class="card" href="reports/AMZN-long-2026-10-12.html">\n'
+                '          <div class="ticker">AMZN</div>\n        </a>\n      </li>\n    </ul>\n  </main>\n</body>\n</html>\n')
+        with tempfile.TemporaryDirectory() as d:
+            port, src = Path(d) / "portfolio", Path(d) / "src"
+            port.mkdir(); src.mkdir()
+            (port / "reports.html").write_text(page, encoding="utf-8")
+            wl, rep = src / f"watchlist-{TODAY}.html", src / f"NVDA-short-{TODAY}.html"
+            wl.write_text("scan", encoding="utf-8"); rep.write_text("report", encoding="utf-8")
+
+            w.publish_to_portfolio(wl, [rep], TODAY, portfolio=port)
+            w.publish_to_portfolio(wl, [rep], TODAY + timedelta(days=1), portfolio=port)  # next day, same report
+            s = (port / "reports.html").read_text(encoding="utf-8")
+            self.assertEqual(s.count('href="reports/watchlist.html"'), 1)
+            self.assertEqual(s.count(f'href="reports/NVDA-short-{TODAY}.html"'), 1)
+            self.assertLess(s.index("reports/watchlist.html"), s.index("AMZN"))   # watchlist card is first
+            self.assertIn("October 16, 2026", s)                                  # its date moved forward
+            self.assertEqual((port / "reports" / "watchlist.html").read_text(encoding="utf-8"), "scan")
+            # Removing the added cards gives back the original page exactly.
+            stripped = re.sub(r'      <li>\n        <a class="card" href="reports/(watchlist|NVDA)[^"]*">.*?</li>\n', "", s, flags=re.S)
+            self.assertEqual(stripped, page)
 
     def test_catalyst_file_needs_future_date_and_source(self):
         with tempfile.NamedTemporaryFile("w", suffix=".csv", delete=False, encoding="utf-8") as f:

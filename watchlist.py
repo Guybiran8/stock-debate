@@ -1,4 +1,5 @@
-"""Daily watchlist scan. Pure code, no AI calls, no trade execution, no entry or stop advice.
+"""Daily watchlist scan. The scan is pure code with no AI calls. Full AI reports run only as
+described under AUTO REPORTS. No trade execution, no entry or stop advice.
 
 HOW EACH STOCK IS TAGGED
 - Catalyst-driven if any of these is true:
@@ -29,6 +30,14 @@ HOW EACH STOCK IS GROUPED (checked in this order)
 7. Reject: everything else (no uptrend). The reasons are listed.
 There is no quota. Any group can be empty.
 
+AUTO REPORTS
+- After the scan, the full short-term AI report runs on Top candidates only, highest score
+  first. Score = room to move; ties go to the stronger 60-day result vs SPY.
+- At most MAX_AUTO_REPORTS (2) per run and per day. Every started report counts, even one that
+  fails, and the count is kept in reports/auto-reports-YYYY-MM-DD.txt. A stock already run
+  today is not run again. With 0 Top candidates nothing runs, and the page says so.
+- Run "python watchlist.py --no-reports" for the free scan only.
+
 ROOM TO MOVE
 - Upside: distance to the nearest resistance above. A stock at or within AT_HIGHS (3%) of
   its 52-week high has no resistance above, so its upside is estimated as 2x the 14-day
@@ -46,6 +55,7 @@ Levels and averages reuse chart.py, so they match the full reports.
 """
 import csv
 import html
+import sys
 from concurrent.futures import ThreadPoolExecutor
 from datetime import date, datetime, timezone
 from datetime import time as dtime
@@ -73,6 +83,9 @@ ATR_MULTIPLE = 2             # upside estimate at highs; AT_HIGHS, MAX_RISK and 
 CATALYST_INDUSTRIES = ("biotechnology", "drug manufacturers", "pharmaceutical")
 
 GROUPS = ["Top candidates", "Watch closely", "Catalyst watch", "Reject"]
+
+MAX_AUTO_REPORTS = 2
+PORTFOLIO_DIR = ROOT.parent / "portfolio"
 
 
 def load_watchlist(path=WATCHLIST_FILE):
@@ -328,10 +341,66 @@ def stock_line(r):
     )
 
 
-def build_page(results, skipped, today):
-    sections = []
+def score(r):
+    m = r["metrics"]
+    return (m["room"] or 0, m["rs60"])
+
+
+def auto_reports(results, today, runner, log_dir=REPORTS_DIR, limit=MAX_AUTO_REPORTS):
+    """Runs runner(ticker) on Top candidates, best score first, within the daily limit.
+    Returns a list of (result, outcome, report_path)."""
+    top = sorted((r for r in results if r["group"] == "Top candidates"), key=score, reverse=True)
+    log = Path(log_dir) / f"auto-reports-{today}.txt"
+    done = log.read_text(encoding="utf-8").split() if log.exists() else []
+    outcomes = []
+    for r in top:
+        t = r["ticker"]
+        if t in done:
+            outcomes.append((r, "already run today", None))
+            continue
+        if len(done) >= limit:
+            outcomes.append((r, f"not run: daily limit of {limit} reached", None))
+            continue
+        # Count it before running, so a crash cannot lead to more than the limit.
+        done.append(t)
+        Path(log_dir).mkdir(exist_ok=True)
+        log.write_text("\n".join(done) + "\n", encoding="utf-8")
+        try:
+            outcomes.append((r, "report run", runner(t)))
+        except Exception as e:
+            outcomes.append((r, f"report failed: {type(e).__name__}: {e}", None))
+    return outcomes
+
+
+def _run_full_report(ticker):
+    from main import analyze  # imported here so the free scan never loads the AI clients
+    return analyze(ticker, "short", open_browser=False)
+
+
+def auto_section(results, outcomes, ran_reports):
+    top = [r for r in results if r["group"] == "Top candidates"]
+    if not ran_reports:
+        body = "<li>Full reports were turned off for this run (--no-reports).</li>"
+    elif not top:
+        body = "<li>0 Top candidates today, so no full reports were run.</li>"
+    else:
+        items = []
+        for r, outcome, path in outcomes:
+            room, rs = score(r)
+            link = f" · <a href='{html.escape(Path(path).name)}'>open report</a>" if path else ""
+            items.append(f"<li><b>{html.escape(r['ticker'])}</b> · score {room:.1f} (room), RS 60d {rs:+.1%} · "
+                         f"{html.escape(outcome)}{link}</li>")
+        body = "".join(items)
+    return (f"<h2 style='margin-top:22px'>Full reports (max {MAX_AUTO_REPORTS} a day)</h2>"
+            f"<ul style='padding-left:18px'>{body}</ul>")
+
+
+def build_page(results, skipped, today, auto_html=""):
+    sections = [auto_html] if auto_html else []
     for g in GROUPS:
         rows = [r for r in results if r["group"] == g]
+        if g == "Top candidates":
+            rows.sort(key=score, reverse=True)
         body = "".join(stock_line(r) for r in rows) or "<li>None today.</li>"
         sections.append(f"<h2 style='margin-top:22px'>{g} ({len(rows)})</h2><ul style='padding-left:18px'>{body}</ul>")
     if skipped:
@@ -343,7 +412,7 @@ def build_page(results, skipped, today):
         f"<title>Watchlist {today}</title></head>"
         "<body style='font-family:sans-serif;font-size:14px;line-height:1.45;max-width:980px;margin:16px auto;padding:0 16px'>"
         f"<h1 style='margin-bottom:2px'>Watchlist scan · {today}</h1>"
-        "<div style='opacity:.7;font-size:12px'>Calculated from Yahoo Finance prices. No AI. "
+        "<div style='opacity:.7;font-size:12px'>Calculated from Yahoo Finance prices. No AI in the scan itself. "
         "Not trade advice: no entries, stops or orders. Chart levels describe past behavior.</div>"
         + "".join(sections)
         + f"<details style='margin-top:22px'><summary style='cursor:pointer;font-weight:700'>Rules</summary>"
@@ -352,17 +421,68 @@ def build_page(results, skipped, today):
     )
 
 
-def run():
+def _long_date(d):
+    return f"{d:%B} {d.day}, {d.year}"
+
+
+def _card(href, title, tag, when):
+    return (f'      <li>\n        <a class="card" href="{href}">\n'
+            f'          <div class="ticker">{title}</div>\n'
+            f'          <div class="tag">{tag}</div>\n'
+            f'          <div class="date">{when}</div>\n'
+            f'        </a>\n      </li>\n')
+
+
+def publish_to_portfolio(page_path, report_paths, today, portfolio=PORTFOLIO_DIR):
+    """Copies the watchlist page and any new full reports into the portfolio and adds cards.
+    Only the cards change on reports.html. Nothing is committed or pushed."""
+    portfolio = Path(portfolio)
+    cards_file = portfolio / "reports.html"
+    if not cards_file.exists():
+        print(f"Portfolio not found at {portfolio}, skipped publishing.")
+        return []
+    dest = portfolio / "reports"
+    dest.mkdir(exist_ok=True)
+    page_html = Path(page_path).read_text(encoding="utf-8")
+    (dest / Path(page_path).name).write_text(page_html, encoding="utf-8")
+    (dest / "watchlist.html").write_text(page_html, encoding="utf-8")
+    copied = [Path(page_path).name, "watchlist.html"]
+
+    s = cards_file.read_text(encoding="utf-8")
+    top_marker = '    <ul class="cards">\n'
+    end_marker = "    </ul>\n  </main>"
+    if s.count(top_marker) != 1 or s.count(end_marker) != 1:
+        raise RuntimeError("reports.html layout changed, so cards were not added.")
+
+    # The watchlist card sits at the top and always points at the latest scan. Only its date changes.
+    start = s.find('<a class="card" href="reports/watchlist.html">')
+    if start == -1:
+        s = s.replace(top_marker, top_marker + _card("reports/watchlist.html", "Daily watchlist",
+                                                     "Watchlist scan", _long_date(today)), 1)
+    else:
+        a = s.index('<div class="date">', start) + len('<div class="date">')
+        b = s.index("</div>", a)
+        s = s[:a] + _long_date(today) + s[b:]
+
+    for rp in report_paths:
+        rp = Path(rp)
+        (dest / rp.name).write_text(rp.read_text(encoding="utf-8"), encoding="utf-8")
+        copied.append(rp.name)
+        href = f"reports/{rp.name}"
+        if f'href="{href}"' not in s:
+            ticker = rp.name.split("-")[0]
+            s = s.replace(end_marker, _card(href, ticker, "Short-term trade", _long_date(today)) + end_marker, 1)
+    cards_file.write_text(s, encoding="utf-8", newline="")
+    return copied
+
+
+def run(ran_reports=True, runner=_run_full_report):
     today = datetime.now(ZoneInfo("America/Los_Angeles")).date()
     tickers = load_watchlist()
     print(f"Scanning {len(tickers)} tickers...")
     prices = download_prices(tickers)
     profiles = fetch_profiles(tickers)
     results, skipped = score_all(tickers, prices, profiles, load_catalysts(today=today), today)
-
-    REPORTS_DIR.mkdir(exist_ok=True)
-    out = REPORTS_DIR / f"watchlist-{today}.html"
-    out.write_text(build_page(results, skipped, today), encoding="utf-8")
 
     for g in GROUPS:
         rows = [r for r in results if r["group"] == g]
@@ -372,9 +492,24 @@ def run():
             print(f"  {r['ticker']:<5} {r['tag']:<16} {'; '.join(r['why'])}{flag}")
     for t, why in skipped:
         print(f"  SKIPPED {t}: {why}")
+
+    outcomes = auto_reports(results, today, runner) if ran_reports else []
+    if ran_reports and not outcomes:
+        print("\n0 Top candidates, so no full reports were run.")
+    for r, outcome, path in outcomes:
+        print(f"\nFull report {r['ticker']}: {outcome}" + (f" ({path})" if path else ""))
+
+    REPORTS_DIR.mkdir(exist_ok=True)
+    out = REPORTS_DIR / f"watchlist-{today}.html"
+    out.write_text(build_page(results, skipped, today, auto_section(results, outcomes, ran_reports)),
+                   encoding="utf-8")
     print(f"\nSaved {out}")
-    return results, skipped
+
+    copied = publish_to_portfolio(out, [p for _, o, p in outcomes if p], today)
+    if copied:
+        print(f"Copied to portfolio: {', '.join(copied)}")
+    return results, skipped, outcomes
 
 
 if __name__ == "__main__":
-    run()
+    run(ran_reports="--no-reports" not in sys.argv)
