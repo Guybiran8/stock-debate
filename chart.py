@@ -128,6 +128,45 @@ def find_levels(daily, price, window=5, tol=0.015):
     return supports, resistances
 
 
+# Shared with watchlist.py so the scan and the full reports describe levels the same way.
+AT_HIGHS = 0.03          # within 3% of the 52-week high counts as "at highs"
+MAX_RISK = 0.15          # a support only counts as nearby if it is within 15% below price
+RISK_FLOOR_ATR = 1       # risk distance is never less than 1x the 14-day ATR
+ATR_DAYS = 14
+SWING_WINDOW = 5
+
+
+def atr(daily, n=ATR_DAYS):
+    # Simple average of the true range over the last n days.
+    trs = [max(c["h"] - c["l"], abs(c["h"] - p["c"]), abs(c["l"] - p["c"]))
+           for p, c in zip(daily[-n - 1:-1], daily[-n:])]
+    return sum(trs) / len(trs)
+
+
+def recent_swing_low(daily, price, window=SWING_WINDOW):
+    # Most recent day whose low is the lowest of the window days on each side, below price.
+    # Returns (low, index into daily) or None.
+    for i in range(len(daily) - 1 - window, window - 1, -1):
+        low = daily[i]["l"]
+        if low < price and low == min(c["l"] for c in daily[i - window:i + window + 1]):
+            return low, i
+    return None
+
+
+def risk_level(price, supports, swing_low, s20, max_risk=MAX_RISK):
+    """Nearest of: closest tested support, most recent swing low, 20-day average.
+    Only counts if below price and within max_risk. Returns (price, label) or None."""
+    cands = []
+    if supports:
+        cands.append((supports[0][0], f"support level, touched {supports[0][1]} times"))
+    if swing_low:
+        cands.append(swing_low)
+    if s20 is not None:
+        cands.append((s20, "20-day average"))
+    ok = [c for c in cands if c[0] < price and (price - c[0]) / price <= max_risk]
+    return max(ok, key=lambda c: c[0]) if ok else None
+
+
 def get_chart(ticker, today):
     daily = poly_candles(ticker, 1, "day", today - timedelta(days=730), today)
     if len(daily) < 60:
@@ -146,17 +185,45 @@ def get_chart(ticker, today):
     is_partial = last_day == ny_now.date() and ny_now.weekday() < 5 and ny_now.time() < dtime(16, 0)
     partial = " (may be a partial day)" if is_partial else ""
 
-    s50, s200 = sma(closes, 50), sma(closes, 200)
+    s20, s50, s200 = sma(closes, 20), sma(closes, 50), sma(closes, 200)
     r = rsi(closes)
     vol20 = sum(c["v"] for c in daily[-21:-1]) / 20
     last_vol = daily[-1]["v"]
-    supports, resistances = find_levels(year, price)
+    levels_below, levels_above = find_levels(year, price)
     high52, low52 = max(c["h"] for c in year), min(c["l"] for c in year)
-    # With no level touched 2+ times, fall back to the 52-week high or low. None marks the fallback.
-    if not resistances:
-        resistances = [(high52, None)]
-    if not supports:
-        supports = [(low52, None)]
+    day_range = atr(daily)
+
+    # Support: only nearby levels count (see risk_level). Lines on the chart are (price, title).
+    swing = recent_swing_low(year, price)
+    swing = (swing[0], f"most recent swing low, {candle_date(year[swing[1]]):%b %d}") if swing else None
+    risk = risk_level(price, levels_below, swing, s20)
+    if risk:
+        supports = [risk] + [(p, f"support level, touched {n} times") for p, n in levels_below
+                             if p < risk[0] and (price - p) / price <= MAX_RISK][:1]
+        gap = (price - risk[0]) / price
+        floor = RISK_FLOOR_ATR * day_range / price
+        support_text = "; ".join(f"${p:,.2f} ({label})" for p, label in supports)
+        distance_text = f"{gap * 100:.1f}% below price"
+        if gap < floor:
+            distance_text += (f", less than one 14-day average true range, so count the risk as at least "
+                              f"{floor * 100:.1f}%")
+    else:
+        supports = []
+        support_text = f"no nearby support (nothing within {MAX_RISK * 100:.0f}% below price)"
+        distance_text = "n/a"
+
+    # Resistance: at or near the 52-week high there is no level above.
+    at_highs = price >= high52 * (1 - AT_HIGHS)
+    if at_highs:
+        resistances = [(high52, "52-week high")]
+        resistance_text = (f"none, at highs (price is within {AT_HIGHS * 100:.0f}% of the "
+                           f"52-week high of ${high52:,.2f})")
+    elif levels_above:
+        resistances = [(p, f"touched {n} times") for p, n in levels_above]
+        resistance_text = "; ".join(f"${p:,.2f} ({label})" for p, label in resistances)
+    else:
+        resistances = [(high52, "52-week high")]
+        resistance_text = f"${high52:,.2f} (52-week high)"
 
     if s50 and s200 and price > s50 > s200:
         trend = "Uptrend: price is above the 50-day average, and the 50-day is above the 200-day."
@@ -170,12 +237,6 @@ def get_chart(ticker, today):
     def change(days):
         return None if len(closes) <= days else closes[-1] / closes[-1 - days] - 1
 
-    def fmt(levels, fallback):
-        return "; ".join(
-            f"${p:,.2f} ({fallback})" if n is None else f"${p:,.2f} (touched {n} times)"
-            for p, n in levels
-        )
-
     lines = [
         f"Latest price: ${price:,.2f} (most recent price on {last_day:%b %d}, from {source}).{stale}",
         f"Candles run through: {last_day:%b %d, %Y}",
@@ -187,8 +248,10 @@ def get_chart(ticker, today):
         f"Change over 3 months: {pct(change(63))}",
         f"52-week high: ${high52:,.2f}",
         f"52-week low: ${low52:,.2f}",
-        f"Nearest support below price: {fmt(supports, '52-week low')}",
-        f"Nearest resistance above price: {fmt(resistances, '52-week high')}",
+        f"Nearest support below price: {support_text}",
+        f"Distance to nearest support: {distance_text}",
+        f"Nearest resistance above price: {resistance_text}",
+        f"14-day average true range (typical daily move): ${day_range:,.2f} ({day_range / price * 100:.1f}% of price)",
         f"RSI (14-day): {num(r)}",
         f"Latest day's volume vs 20-day average: {last_vol / vol20:.2f}x{partial}",
     ]
@@ -217,10 +280,12 @@ def chart_html(ticker, chart):
     line50 = [{"time": day(daily[i]), "value": ma50[i]} for i in show if ma50[i] is not None]
     line200 = [{"time": day(daily[i]), "value": ma200[i]} for i in show if ma200[i] is not None]
     levels = (
-        [{"price": round(p, 2), "color": "#2e9e4f", "title": "Support" if n else "52-week low"}
-         for p, n in chart["supports"]]
-        + [{"price": round(p, 2), "color": "#e04848", "title": "Resistance" if n else "52-week high"}
-           for p, n in chart["resistances"]]
+        [{"price": round(p, 2), "color": "#2e9e4f",
+          "title": "Support" if label.startswith("support") else label.split(",")[0].capitalize()}
+         for p, label in chart["supports"]]
+        + [{"price": round(p, 2), "color": "#e04848",
+            "title": "52-week high" if label == "52-week high" else "Resistance"}
+           for p, label in chart["resistances"]]
     )
     box = f"chart_{ticker}_{len(daily)}"
 
