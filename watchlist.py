@@ -38,6 +38,13 @@ AUTO REPORTS
   today is not run again. With 0 Top candidates nothing runs, and the page says so.
 - Run "python watchlist.py --no-reports" for the free scan only.
 
+PUBLISHING
+- Each run copies the watchlist page and new reports into ../portfolio and rebuilds its
+  reports pages, then commits and pushes the portfolio repo. Before committing, every staged
+  file goes through secret_scan.py (the .env key values and common key formats). If it finds
+  anything, the files are unstaged and nothing is committed or pushed.
+- Run with "--no-push" to update the portfolio files without committing or pushing.
+
 ROOM TO MOVE
 - Upside: distance to the nearest resistance above. A stock at or within AT_HIGHS (3%) of
   its 52-week high has no resistance above, so its upside is estimated as 2x the 14-day
@@ -55,6 +62,9 @@ Levels and averages reuse chart.py, so they match the full reports.
 """
 import csv
 import html
+import os
+import shutil
+import subprocess
 import sys
 from concurrent.futures import ThreadPoolExecutor
 from datetime import date, datetime, timezone
@@ -452,7 +462,57 @@ def publish_to_portfolio(page_path, report_paths, today, portfolio=PORTFOLIO_DIR
     return copied + ["reports.html", "stocks/"]
 
 
-def run(ran_reports=True, runner=_run_full_report):
+def _git_push(repo):
+    # Push with the GitHub CLI's login so it never waits on a hidden password prompt.
+    gh = (shutil.which("gh") or "C:/Program Files/GitHub CLI/gh.exe").replace("\\", "/")
+    return subprocess.run(
+        ["git", "-C", str(repo), "-c", "credential.helper=", "-c", f'credential.helper=!"{gh}" auth git-credential',
+         "push", "-q", "origin", "HEAD"],
+        capture_output=True, text=True, timeout=120, env={**os.environ, "GIT_TERMINAL_PROMPT": "0"})
+
+
+def push_portfolio(today, portfolio=PORTFOLIO_DIR, secrets=None, push=_git_push):
+    """Commits and pushes the portfolio, but only if the secret scan finds nothing.
+    Returns "pushed", "no changes", "blocked", "no repo", "commit failed" or "push failed"."""
+    import secret_scan
+
+    portfolio = Path(portfolio)
+    if not (portfolio / ".git").exists():
+        print(f"{portfolio} is not a git repo, so nothing was pushed.")
+        return "no repo"
+
+    def git(*args):
+        return subprocess.run(["git", "-C", str(portfolio), *args], capture_output=True, text=True)
+
+    git("add", "-A")
+    if git("diff", "--cached", "--quiet").returncode == 0:
+        print("Portfolio has no changes, so nothing was pushed.")
+        return "no changes"
+    secrets = secret_scan.env_values(ROOT / ".env") if secrets is None else secrets
+    found = secret_scan.scan_staged(portfolio, secrets)
+    if found:
+        git("reset", "-q")
+        print("STOPPED: the secret scan found something, so nothing was committed or pushed.")
+        for f, hits in found:
+            print(f"  {f}: {', '.join(hits)}")
+        return "blocked"
+    commit = git("commit", "-q", "-m", f"Daily scan {today}")
+    if commit.returncode:
+        print(f"Commit failed: {commit.stderr.strip() or commit.stdout.strip()}")
+        return "commit failed"
+    try:
+        result = push(portfolio)
+    except subprocess.TimeoutExpired:
+        print("Push timed out. The commit is saved locally and will go out with the next push.")
+        return "push failed"
+    if result.returncode:
+        print(f"Push failed: {result.stderr.strip()}. The commit is saved locally and will go out with the next push.")
+        return "push failed"
+    print("Secret scan clean. Pushed the portfolio; GitHub Pages updates in a minute or two.")
+    return "pushed"
+
+
+def run(ran_reports=True, runner=_run_full_report, push=True):
     today = datetime.now(ZoneInfo("America/Los_Angeles")).date()
     tickers = load_watchlist()
     print(f"Scanning {len(tickers)} tickers...")
@@ -485,8 +545,10 @@ def run(ran_reports=True, runner=_run_full_report):
     copied = publish_to_portfolio(out, [p for _, o, p in outcomes if p], today, prices=prices, names=names)
     if copied:
         print(f"Copied to portfolio: {', '.join(copied)}")
+        if push:
+            push_portfolio(today)
     return results, skipped, outcomes
 
 
 if __name__ == "__main__":
-    run(ran_reports="--no-reports" not in sys.argv)
+    run(ran_reports="--no-reports" not in sys.argv, push="--no-push" not in sys.argv)

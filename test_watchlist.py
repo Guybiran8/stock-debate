@@ -4,6 +4,7 @@ import json
 import os
 import random
 import re
+import subprocess
 import tempfile
 import unittest
 from datetime import date, timedelta
@@ -49,12 +50,13 @@ def perfect_metrics(**overrides):
 
 
 class WatchlistTest(unittest.TestCase):
-    def test_watchlist_file_has_44_unique_tickers(self):
+    def test_watchlist_file_has_43_unique_tickers(self):
         tickers = w.load_watchlist()
-        self.assertEqual(len(tickers), 44)
-        self.assertEqual(len(set(tickers)), 44)
+        self.assertEqual(len(tickers), 43)
+        self.assertEqual(len(set(tickers)), 43)
+        self.assertNotIn("APLS", tickers)
 
-    def test_scoring_runs_on_all_44_tickers(self):
+    def test_scoring_runs_on_all_watchlist_tickers(self):
         tickers = w.load_watchlist()
         prices = {w.BENCHMARK: fake_candles("spy", drift=0.0004, vol=0.01, volume=80e6)}
         profiles = {}
@@ -293,6 +295,55 @@ class WatchlistTest(unittest.TestCase):
         drop[-1].update(c=ma20[-1] * 0.99, l=ma20[-1] * 0.98)
         events = w_page.todays_events(drop, w_page.sma_series([c["c"] for c in drop], 20))
         self.assertIn("closed below the 20-day average", events)
+
+    def _repo(self, d):
+        repo = Path(d) / "portfolio"
+        repo.mkdir()
+        for args in (["init", "-q", "-b", "main"], ["config", "user.name", "t"], ["config", "user.email", "t@example.com"]):
+            subprocess.run(["git", "-C", str(repo), *args], check=True, capture_output=True)
+        (repo / "index.html").write_text("start", encoding="utf-8")
+        subprocess.run(["git", "-C", str(repo), "add", "-A"], check=True, capture_output=True)
+        subprocess.run(["git", "-C", str(repo), "commit", "-q", "-m", "start"], check=True, capture_output=True)
+        return repo
+
+    def _log(self, repo):
+        return subprocess.run(["git", "-C", str(repo), "log", "--format=%s"], capture_output=True, text=True).stdout.split("\n")[0]
+
+    def test_push_stops_when_secret_scan_finds_something(self):
+        fake_value = "FAKEVALUE" + "0123456789abcdef"
+        fake_key_format = "s" + "k-" + "x" * 24      # built here so this file never matches itself
+        pushed = []
+        with tempfile.TemporaryDirectory() as d:
+            repo = self._repo(d)
+            for leak in (fake_value, fake_key_format, fake_value[-12:]):   # full value, key format, part of a value
+                (repo / "reports.html").write_text(f"page with {leak} inside", encoding="utf-8")
+                result = w.push_portfolio(TODAY, portfolio=repo, secrets={"TEST_KEY": fake_value},
+                                          push=lambda r: pushed.append(r))
+                self.assertEqual(result, "blocked")
+                self.assertEqual(self._log(repo), "start")                      # nothing committed
+                staged = subprocess.run(["git", "-C", str(repo), "diff", "--cached", "--name-only"],
+                                        capture_output=True, text=True).stdout
+                self.assertEqual(staged, "")                                    # and nothing left staged
+        self.assertEqual(pushed, [])
+
+    def test_push_commits_and_pushes_when_clean(self):
+        pushed = []
+
+        def fake_push(repo):
+            pushed.append(repo)
+            return subprocess.CompletedProcess([], 0, "", "")
+
+        with tempfile.TemporaryDirectory() as d:
+            repo = self._repo(d)
+            self.assertEqual(w.push_portfolio(TODAY, portfolio=repo, secrets={}, push=fake_push), "no changes")
+            (repo / "reports.html").write_text("new cards", encoding="utf-8")
+            self.assertEqual(w.push_portfolio(TODAY, portfolio=repo, secrets={"TEST_KEY": "notInThePage123"},
+                                              push=fake_push), "pushed")
+            self.assertEqual(self._log(repo), f"Daily scan {TODAY}")
+            self.assertEqual(pushed, [repo])
+            failing = lambda r: subprocess.CompletedProcess([], 1, "", "network down")  # noqa: E731
+            (repo / "reports.html").write_text("newer cards", encoding="utf-8")
+            self.assertEqual(w.push_portfolio(TODAY, portfolio=repo, secrets={}, push=failing), "push failed")
 
     def test_catalyst_file_needs_future_date_and_source(self):
         with tempfile.NamedTemporaryFile("w", suffix=".csv", delete=False, encoding="utf-8") as f:
