@@ -167,35 +167,26 @@ def risk_level(price, supports, swing_low, s20, max_risk=MAX_RISK):
     return max(ok, key=lambda c: c[0]) if ok else None
 
 
-def get_chart(ticker, today):
-    daily = poly_candles(ticker, 1, "day", today - timedelta(days=730), today)
-    if len(daily) < 60:
-        raise ValueError(f"Not enough price history for {ticker}.")
-    daily, added = add_recent_days(ticker, daily)
+def trend_label(price, s50, s200):
+    if s50 and s200 and price > s50 > s200:
+        return "Uptrend: price is above the 50-day average, and the 50-day is above the 200-day."
+    if s50 and s200 and price < s50 < s200:
+        return "Downtrend: price is below the 50-day average, and the 50-day is below the 200-day."
+    if s50 and s200 and s50 > s200 and price < s50:
+        return "Pullback: the 50-day average is above the 200-day, but price has dropped below the 50-day."
+    return "Mixed: price and the two averages do not line up in one direction."
 
-    closes = [c["c"] for c in daily]
-    year = daily[-252:]
-    price = closes[-1]
-    last_day = candle_date(daily[-1])
-    source = "Yahoo Finance" if added else "Polygon"
-    stale = "" if last_day >= today - timedelta(days=1) else " WARNING: this price may be out of date."
 
-    # The latest day is only partial if it is today in New York and the market has not closed yet.
-    ny_now = datetime.now(ZoneInfo("America/New_York"))
-    is_partial = last_day == ny_now.date() and ny_now.weekday() < 5 and ny_now.time() < dtime(16, 0)
-    partial = " (may be a partial day)" if is_partial else ""
-
-    s20, s50, s200 = sma(closes, 20), sma(closes, 50), sma(closes, 200)
-    r = rsi(closes)
-    vol20 = sum(c["v"] for c in daily[-21:-1]) / 20
-    last_vol = daily[-1]["v"]
+def nearby_levels(year, price, s20, day_label):
+    """Support and resistance as the reports describe them. year is the last ~252 candles,
+    day_label(candle) formats a candle's date. Lines are (price, label) pairs."""
     levels_below, levels_above = find_levels(year, price)
-    high52, low52 = max(c["h"] for c in year), min(c["l"] for c in year)
-    day_range = atr(daily)
+    high52 = max(c["h"] for c in year)
+    day_range = atr(year)
 
-    # Support: only nearby levels count (see risk_level). Lines on the chart are (price, title).
+    # Support: only nearby levels count (see risk_level).
     swing = recent_swing_low(year, price)
-    swing = (swing[0], f"most recent swing low, {candle_date(year[swing[1]]):%b %d}") if swing else None
+    swing = (swing[0], f"most recent swing low, {day_label(year[swing[1]])}") if swing else None
     risk = risk_level(price, levels_below, swing, s20)
     if risk:
         supports = [risk] + [(p, f"support level, touched {n} times") for p, n in levels_below
@@ -224,15 +215,40 @@ def get_chart(ticker, today):
     else:
         resistances = [(high52, "52-week high")]
         resistance_text = f"${high52:,.2f} (52-week high)"
+    return {
+        "supports": supports, "resistances": resistances, "at_highs": at_highs,
+        "support_text": support_text, "distance_text": distance_text,
+        "resistance_text": resistance_text, "atr": day_range, "high52": high52,
+    }
 
-    if s50 and s200 and price > s50 > s200:
-        trend = "Uptrend: price is above the 50-day average, and the 50-day is above the 200-day."
-    elif s50 and s200 and price < s50 < s200:
-        trend = "Downtrend: price is below the 50-day average, and the 50-day is below the 200-day."
-    elif s50 and s200 and s50 > s200 and price < s50:
-        trend = "Pullback: the 50-day average is above the 200-day, but price has dropped below the 50-day."
-    else:
-        trend = "Mixed: price and the two averages do not line up in one direction."
+
+def get_chart(ticker, today):
+    daily = poly_candles(ticker, 1, "day", today - timedelta(days=730), today)
+    if len(daily) < 60:
+        raise ValueError(f"Not enough price history for {ticker}.")
+    daily, added = add_recent_days(ticker, daily)
+
+    closes = [c["c"] for c in daily]
+    year = daily[-252:]
+    price = closes[-1]
+    last_day = candle_date(daily[-1])
+    source = "Yahoo Finance" if added else "Polygon"
+    stale = "" if last_day >= today - timedelta(days=1) else " WARNING: this price may be out of date."
+
+    # The latest day is only partial if it is today in New York and the market has not closed yet.
+    ny_now = datetime.now(ZoneInfo("America/New_York"))
+    is_partial = last_day == ny_now.date() and ny_now.weekday() < 5 and ny_now.time() < dtime(16, 0)
+    partial = " (may be a partial day)" if is_partial else ""
+
+    s20, s50, s200 = sma(closes, 20), sma(closes, 50), sma(closes, 200)
+    r = rsi(closes)
+    vol20 = sum(c["v"] for c in daily[-21:-1]) / 20
+    last_vol = daily[-1]["v"]
+    high52, low52 = max(c["h"] for c in year), min(c["l"] for c in year)
+    lv = nearby_levels(year, price, s20, lambda c: f"{candle_date(c):%b %d}")
+    supports, resistances, day_range = lv["supports"], lv["resistances"], lv["atr"]
+    support_text, distance_text, resistance_text = lv["support_text"], lv["distance_text"], lv["resistance_text"]
+    trend = trend_label(price, s50, s200)
 
     def change(days):
         return None if len(closes) <= days else closes[-1] / closes[-1 - days] - 1

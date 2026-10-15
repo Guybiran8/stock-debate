@@ -1,5 +1,6 @@
 """Run with: python -m unittest test_watchlist -v
 Uses made-up prices, so it needs no network and spends nothing."""
+import json
 import os
 import random
 import re
@@ -12,6 +13,7 @@ from pathlib import Path
 for key in ("ANTHROPIC_API_KEY", "OPENAI_API_KEY", "XAI_API_KEY", "POLYGON_API_KEY"):
     os.environ.setdefault(key, "test-placeholder")
 
+import portfolio_page as w_page  # noqa: E402
 import watchlist as w  # noqa: E402
 
 TODAY = date(2026, 10, 15)
@@ -169,28 +171,92 @@ class WatchlistTest(unittest.TestCase):
         page = w.build_page([], [], TODAY, w.auto_section([], [], True))
         self.assertIn("0 Top candidates today, so no full reports were run.", page)
 
-    def test_publish_adds_cards_without_touching_other_text(self):
-        page = ('<!DOCTYPE html>\n<html>\n<body>\n  <main class="wrap">\n    <h1>Example reports</h1>\n'
-                '    <ul class="cards">\n      <li>\n        <a class="card" href="reports/AMZN-long-2026-10-12.html">\n'
-                '          <div class="ticker">AMZN</div>\n        </a>\n      </li>\n    </ul>\n  </main>\n</body>\n</html>\n')
+    def test_portfolio_page_rebuild(self):
+        top = ('<!DOCTYPE html>\n<html>\n<head><link rel="stylesheet" href="style.css"></head>\n<body>\n'
+               '  <nav>Guy Biran</nav>\n  <main class="wrap">\n    <header class="intro">\n'
+               '      <h1>Example reports</h1>\n    </header>\n')
+        bottom = '  </main>\n  <footer>Guy Biran</footer>\n</body>\n</html>\n'
+        old_middle = '    <ul class="cards"><li>old card</li></ul>\n'
         with tempfile.TemporaryDirectory() as d:
-            port, src = Path(d) / "portfolio", Path(d) / "src"
-            port.mkdir(); src.mkdir()
-            (port / "reports.html").write_text(page, encoding="utf-8")
-            wl, rep = src / f"watchlist-{TODAY}.html", src / f"NVDA-short-{TODAY}.html"
-            wl.write_text("scan", encoding="utf-8"); rep.write_text("report", encoding="utf-8")
+            port = Path(d)
+            (port / "reports").mkdir()
+            (port / "reports.html").write_text(top + old_middle + bottom, encoding="utf-8")
+            files = {"NVDA-short-2026-10-13.html": "NVIDIA Corporation (NVDA)",
+                     "NVDA-short-2026-10-01.html": "NVIDIA Corporation (NVDA)",
+                     "NVDA-long-2026-09-20.html": "NVIDIA Corporation (NVDA)",
+                     "KO-long-2026-10-13.html": "The Coca-Cola Company (KO)",
+                     f"watchlist-{TODAY}.html": "Watchlist", "watchlist.html": "Watchlist"}
+            for name, title in files.items():
+                (port / "reports" / name).write_text(f"<html><head><title>{title}</title></head></html>", encoding="utf-8")
 
-            w.publish_to_portfolio(wl, [rep], TODAY, portfolio=port)
-            w.publish_to_portfolio(wl, [rep], TODAY + timedelta(days=1), portfolio=port)  # next day, same report
-            s = (port / "reports.html").read_text(encoding="utf-8")
-            self.assertEqual(s.count('href="reports/watchlist.html"'), 1)
-            self.assertEqual(s.count(f'href="reports/NVDA-short-{TODAY}.html"'), 1)
-            self.assertLess(s.index("reports/watchlist.html"), s.index("AMZN"))   # watchlist card is first
-            self.assertIn("October 16, 2026", s)                                  # its date moved forward
-            self.assertEqual((port / "reports" / "watchlist.html").read_text(encoding="utf-8"), "scan")
-            # Removing the added cards gives back the original page exactly.
-            stripped = re.sub(r'      <li>\n        <a class="card" href="reports/(watchlist|NVDA)[^"]*">.*?</li>\n', "", s, flags=re.S)
-            self.assertEqual(stripped, page)
+            asked = []
+
+            def download(tickers):
+                asked.extend(tickers)
+                return {t: fake_candles(t) for t in tickers}
+
+            built = w_page.build(port, TODAY, prices={"NVDA": fake_candles("nvda")}, download=download)
+            page = (port / "reports.html").read_text(encoding="utf-8")
+
+            self.assertEqual(asked, ["KO"])                         # KO is not on the watchlist; NVDA was already loaded
+            self.assertEqual(built["charts"], ["KO", "NVDA"])
+            self.assertTrue(page.startswith(top) and page.endswith(bottom))
+            self.assertNotIn("old card", page)
+            self.assertLess(page.index("Daily watchlist"), page.index('id="report-search"'))
+            self.assertLess(page.index('id="report-search"'), page.index('class="stock"'))
+            self.assertIn("No reports for that stock yet.", page)
+            self.assertIn('data-search="nvda nvidia corporation"', page)
+            self.assertIn('data-search="ko the coca-cola company"', page)
+            self.assertIn("Chart today (updated daily)", page)
+
+            nvda = page[page.index('id="stock-NVDA"'):]
+            nvda = nvda[:nvda.index("</section>")]
+            latest = nvda[nvda.index("Latest AI report"):nvda.index("Older reports")]
+            self.assertIn("NVDA-short-2026-10-13.html", latest)
+            self.assertIn("(2 days old)", latest)
+            self.assertIn('<span class="stale" hidden>', latest)    # 2 days: not out of date
+            older = nvda[nvda.index("<details"):]
+            self.assertLess(older.index("2026-10-01"), older.index("2026-09-20"))   # newest first
+            self.assertIn("(14 days old)", older)
+
+            data = (port / "reports" / "charts-data.js").read_text(encoding="utf-8")
+            self.assertTrue(data.startswith("window.CHART_DATA = "))
+            charts = json.loads(data[len("window.CHART_DATA = "):].rstrip().rstrip(";"))
+            self.assertEqual(set(charts), {"NVDA", "KO"})
+            self.assertEqual(len(charts["NVDA"]["candles"]), w_page.CHART_DAYS)
+
+            # Rebuilding again replaces the generated part instead of stacking it.
+            w_page.build(port, TODAY, prices={"NVDA": fake_candles("nvda"), "KO": fake_candles("KO")}, download=download)
+            again = (port / "reports.html").read_text(encoding="utf-8")
+            self.assertEqual(again.count('id="report-search"'), 1)
+            self.assertTrue(again.startswith(top) and again.endswith(bottom))
+
+    def test_short_report_older_than_five_days_is_flagged(self):
+        r = {"file": "X-short-2026-10-09.html", "horizon": "short", "date": date(2026, 10, 9), "name": "X"}
+        self.assertIn('<span class="stale">may be out of date', w_page._report_link(r, TODAY, latest=True))
+        self.assertIn("(6 days old)", w_page._report_link(r, TODAY, latest=True))
+        long_r = dict(r, horizon="long", file="X-long-2026-10-01.html", date=date(2026, 10, 1))
+        self.assertIn('<span class="stale" hidden>', w_page._report_link(long_r, TODAY, latest=True))
+
+    def test_todays_events(self):
+        base = fake_candles("e", days=300, drift=0.0, vol=0.002, volume=1e6)
+        closes = [c["c"] for c in base]
+        ma20 = w_page.sma_series(closes, 20)
+        self.assertEqual(w_page.todays_events(base, ma20), [])
+        # A big up day on heavy volume to a new high.
+        jump = [dict(c) for c in base]
+        top = max(c["h"] for c in jump[-253:-1])
+        jump[-1].update(o=jump[-2]["c"], c=top * 1.08, h=top * 1.09, l=jump[-2]["c"], v=5e6)
+        events = w_page.todays_events(jump, w_page.sma_series([c["c"] for c in jump], 20))
+        self.assertTrue(any(e.startswith("moved +") for e in events))
+        self.assertTrue(any(e.startswith("breakout: closed above the prior 52-week high") for e in events))
+        self.assertTrue(any(e.startswith("volume ") for e in events))
+        # Closing below the 20-day average after being above it.
+        drop = [dict(c) for c in base]
+        drop[-2].update(c=max(ma20[-2], drop[-2]["c"]) * 1.001)
+        drop[-1].update(c=ma20[-1] * 0.99, l=ma20[-1] * 0.98)
+        events = w_page.todays_events(drop, w_page.sma_series([c["c"] for c in drop], 20))
+        self.assertIn("closed below the 20-day average", events)
 
     def test_catalyst_file_needs_future_date_and_source(self):
         with tempfile.NamedTemporaryFile("w", suffix=".csv", delete=False, encoding="utf-8") as f:

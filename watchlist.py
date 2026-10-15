@@ -421,24 +421,13 @@ def build_page(results, skipped, today, auto_html=""):
     )
 
 
-def _long_date(d):
-    return f"{d:%B} {d.day}, {d.year}"
+def publish_to_portfolio(page_path, report_paths, today, portfolio=PORTFOLIO_DIR, prices=None, download=None):
+    """Copies the watchlist page and any new full reports into the portfolio, then rebuilds
+    reports.html so every stock's chart is refreshed. Nothing is committed or pushed."""
+    import portfolio_page
 
-
-def _card(href, title, tag, when):
-    return (f'      <li>\n        <a class="card" href="{href}">\n'
-            f'          <div class="ticker">{title}</div>\n'
-            f'          <div class="tag">{tag}</div>\n'
-            f'          <div class="date">{when}</div>\n'
-            f'        </a>\n      </li>\n')
-
-
-def publish_to_portfolio(page_path, report_paths, today, portfolio=PORTFOLIO_DIR):
-    """Copies the watchlist page and any new full reports into the portfolio and adds cards.
-    Only the cards change on reports.html. Nothing is committed or pushed."""
     portfolio = Path(portfolio)
-    cards_file = portfolio / "reports.html"
-    if not cards_file.exists():
+    if not (portfolio / "reports.html").exists():
         print(f"Portfolio not found at {portfolio}, skipped publishing.")
         return []
     dest = portfolio / "reports"
@@ -447,33 +436,15 @@ def publish_to_portfolio(page_path, report_paths, today, portfolio=PORTFOLIO_DIR
     (dest / Path(page_path).name).write_text(page_html, encoding="utf-8")
     (dest / "watchlist.html").write_text(page_html, encoding="utf-8")
     copied = [Path(page_path).name, "watchlist.html"]
-
-    s = cards_file.read_text(encoding="utf-8")
-    top_marker = '    <ul class="cards">\n'
-    end_marker = "    </ul>\n  </main>"
-    if s.count(top_marker) != 1 or s.count(end_marker) != 1:
-        raise RuntimeError("reports.html layout changed, so cards were not added.")
-
-    # The watchlist card sits at the top and always points at the latest scan. Only its date changes.
-    start = s.find('<a class="card" href="reports/watchlist.html">')
-    if start == -1:
-        s = s.replace(top_marker, top_marker + _card("reports/watchlist.html", "Daily watchlist",
-                                                     "Watchlist scan", _long_date(today)), 1)
-    else:
-        a = s.index('<div class="date">', start) + len('<div class="date">')
-        b = s.index("</div>", a)
-        s = s[:a] + _long_date(today) + s[b:]
-
     for rp in report_paths:
         rp = Path(rp)
         (dest / rp.name).write_text(rp.read_text(encoding="utf-8"), encoding="utf-8")
         copied.append(rp.name)
-        href = f"reports/{rp.name}"
-        if f'href="{href}"' not in s:
-            ticker = rp.name.split("-")[0]
-            s = s.replace(end_marker, _card(href, ticker, "Short-term trade", _long_date(today)) + end_marker, 1)
-    cards_file.write_text(s, encoding="utf-8", newline="")
-    return copied
+
+    built = portfolio_page.build(portfolio, today, prices=prices, download=download)
+    print(f"Rebuilt reports.html: {len(built['blocks'])} stock blocks, charts for {len(built['charts'])}"
+          + (f", no chart data for {', '.join(built['no_chart'])}" if built["no_chart"] else ""))
+    return copied + ["reports.html", "charts-data.js"]
 
 
 def run(ran_reports=True, runner=_run_full_report):
@@ -505,7 +476,7 @@ def run(ran_reports=True, runner=_run_full_report):
                    encoding="utf-8")
     print(f"\nSaved {out}")
 
-    copied = publish_to_portfolio(out, [p for _, o, p in outcomes if p], today)
+    copied = publish_to_portfolio(out, [p for _, o, p in outcomes if p], today, prices=prices)
     if copied:
         print(f"Copied to portfolio: {', '.join(copied)}")
     return results, skipped, outcomes
