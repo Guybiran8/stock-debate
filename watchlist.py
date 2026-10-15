@@ -434,7 +434,7 @@ def build_page(results, skipped, today, auto_html=""):
 
 
 def publish_to_portfolio(page_path, report_paths, today, portfolio=PORTFOLIO_DIR, prices=None, names=None,
-                         download=None, fetch_names=None):
+                         download=None, fetch_names=None, scan=None):
     """Copies the watchlist page and any new full reports into the portfolio, then rebuilds
     reports.html and every stocks/TICKER.html page. Nothing is committed or pushed."""
     import portfolio_page
@@ -455,7 +455,7 @@ def publish_to_portfolio(page_path, report_paths, today, portfolio=PORTFOLIO_DIR
         copied.append(rp.name)
 
     built = portfolio_page.build(portfolio, today, prices=prices, names=names, download=download,
-                                 fetch_names=fetch_names)
+                                 fetch_names=fetch_names, scan=scan)
     print(f"Rebuilt reports.html with {len(built['cards'])} cards and the stock pages"
           + (f"; no chart data for {', '.join(built['no_chart'])}" if built["no_chart"] else "")
           + (f"; no company name for {', '.join(built['no_name'])}" if built["no_name"] else ""))
@@ -542,7 +542,11 @@ def run(ran_reports=True, runner=_run_full_report, push=True):
     print(f"\nSaved {out}")
 
     names = {t: p.get("name") for t, p in profiles.items() if p.get("name")}
-    copied = publish_to_portfolio(out, [p for _, o, p in outcomes if p], today, prices=prices, names=names)
+    import portfolio_page
+    groups = {r["ticker"]: r["group"] for r in results}
+    portfolio_page.save_scan(today, groups)
+    copied = publish_to_portfolio(out, [p for _, o, p in outcomes if p], today, prices=prices, names=names,
+                                  scan={"date": today, "groups": groups})
     if copied:
         print(f"Copied to portfolio: {', '.join(copied)}")
         if push:

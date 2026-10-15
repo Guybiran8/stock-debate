@@ -9,6 +9,7 @@ import tempfile
 import unittest
 from datetime import date, timedelta
 from pathlib import Path
+from unittest import mock
 
 # chart.py imports config.py, which needs these to exist. No API call is made.
 for key in ("ANTHROPIC_API_KEY", "OPENAI_API_KEY", "XAI_API_KEY", "POLYGON_API_KEY"):
@@ -205,8 +206,10 @@ class WatchlistTest(unittest.TestCase):
                 named.extend(tickers)
                 return {"NODATA": "No Data Inc"}
 
+            scan = {"date": TODAY, "groups": {"SOFI": "Watch closely", "NVDA": "Reject", "NODATA": "Reject"}}
             built = w_page.build(port, TODAY, prices={"NVDA": fake_candles("nvda")}, names={"SOFI": "SoFi Technologies"},
-                                 download=download, fetch_names=fetch_names, watchlist=["SOFI", "NVDA", "NODATA"])
+                                 download=download, fetch_names=fetch_names, watchlist=["SOFI", "NVDA", "NODATA"],
+                                 scan=scan)
             page = (port / "reports.html").read_text(encoding="utf-8")
 
             self.assertEqual(sorted(asked), ["KO", "NODATA", "SOFI"])   # NVDA prices were already loaded
@@ -215,8 +218,15 @@ class WatchlistTest(unittest.TestCase):
             self.assertEqual(built["no_chart"], ["NODATA"])
             self.assertTrue(page.startswith(top) and page.endswith(bottom))
             self.assertNotIn("old card", page)
-            self.assertLess(page.index("Daily watchlist"), page.index('id="report-search"'))
-            self.assertLess(page.index('id="report-search"'), page.index('class="cards stock-cards"'))
+            self.assertNotIn("Daily watchlist", page)                    # the separate card is gone
+            self.assertLess(page.index('id="report-search"'), page.index('class="group-filters"'))
+            self.assertLess(page.index('class="group-filters"'), page.index('class="scan-line"'))
+            self.assertLess(page.index('class="scan-line"'), page.index('class="cards stock-cards"'))
+            for label in ["All", "Top candidates", "Watch closely", "Catalyst watch", "Reject"]:
+                self.assertIn(f'aria-pressed="{"true" if label == "All" else "false"}">{label}</button>', page)
+            self.assertIn("Scan of Oct 15: 0 Top · 1 Watch closely · 0 Catalyst watch · 2 Reject · "
+                          '<a href="reports/watchlist.html">See full scan details</a>', page)
+            self.assertIn("No stocks in this group today.", page)
             self.assertIn("No reports for that stock yet.", page)
 
             def card(t):
@@ -227,8 +237,13 @@ class WatchlistTest(unittest.TestCase):
             self.assertIn("SoFi Technologies", card("SOFI"))
             self.assertIn("No report yet", card("SOFI"))
             self.assertIn("No chart data", card("NODATA"))
+            self.assertIn('<span class="tag group">Watch closely</span>', card("SOFI"))
+            self.assertIn('<span class="tag group">Reject</span>', card("NVDA"))
+            self.assertNotIn("tag group", card("KO"))                    # not on the watchlist: no group
+            self.assertIn('data-group="watch"', page[page.rindex("<li", 0, page.index('href="stocks/SOFI.html"')):])
+            self.assertIn('data-group=""', page[page.rindex("<li", 0, page.index('href="stocks/KO.html"')):])
             for t in ["KO", "NVDA", "SOFI"]:
-                self.assertRegex(card(t), r'<div class="tag">(At highs|Downtrend|Below 200-day|Below 50-day|Uptrend|Mixed)</div>')
+                self.assertRegex(card(t), r'<div class="tags"><span class="tag">(At highs|Downtrend|Below 200-day|Below 50-day|Uptrend|Mixed)</span>')
             self.assertIn('data-search="ko the coca-cola company"', page)
 
             pages = sorted(f.name for f in (port / "stocks").glob("*.html"))
@@ -255,10 +270,15 @@ class WatchlistTest(unittest.TestCase):
             self.assertIn("Chart data is not available today.", (port / "stocks" / "NODATA.html").read_text(encoding="utf-8"))
 
             # Rebuilding again replaces the generated part instead of stacking it.
-            w_page.build(port, TODAY, prices={t: fake_candles(t) for t in ["NVDA", "KO", "SOFI"]}, names={"SOFI": "SoFi"},
-                         download=download, fetch_names=fetch_names, watchlist=["SOFI", "NVDA", "NODATA"])
+            saved = Path(d) / "latest-scan.json"
+            w_page.save_scan(TODAY, {"SOFI": "Top candidates"}, path=saved)
+            with mock.patch.object(w_page, "LATEST_SCAN", saved):        # no scan passed: the saved one is used
+                w_page.build(port, TODAY, prices={t: fake_candles(t) for t in ["NVDA", "KO", "SOFI"]},
+                             names={"SOFI": "SoFi"}, download=download, fetch_names=fetch_names,
+                             watchlist=["SOFI", "NVDA", "NODATA"])
             again = (port / "reports.html").read_text(encoding="utf-8")
             self.assertEqual(again.count('id="report-search"'), 1)
+            self.assertIn("Scan of Oct 15: 1 Top · 0 Watch closely", again)
             self.assertTrue(again.startswith(top) and again.endswith(bottom))
 
     def test_status_tag(self):

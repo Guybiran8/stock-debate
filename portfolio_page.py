@@ -1,9 +1,11 @@
 """Builds the portfolio's reports pages. Pure code, no AI, no cost.
 
-reports.html: the daily watchlist card pinned on top, a search bar, and one compact card per
-stock (every ticker in watchlist.txt plus any stock with a report in ../portfolio/reports/).
-Each card shows the ticker, company name, a short status tag from today's prices, and the
-latest AI report date or "No report yet". Only the part between the page's </header> and
+reports.html: a search bar, filter buttons for today's scan groups (All, Top candidates, Watch
+closely, Catalyst watch, Reject), a line with today's counts and a link to the full scan page,
+and one compact card per stock (every ticker in watchlist.txt plus any stock with a report in
+../portfolio/reports/). Each card shows the ticker, company name, a short status tag from
+today's prices, the stock's scan group (none for stocks not on the watchlist, which only show
+under All), and the latest AI report date or "No report yet". Only the part between the page's </header> and
 </main> is generated; the nav, intro and footer are kept exactly as they are.
 
 stocks/TICKER.html: one page per card with the daily chart (20/50/200-day averages, nearby
@@ -188,16 +190,32 @@ def _report_link(r, today, latest=False, prefix="../reports/"):
 
 # ---------- reports.html (card grid) ----------
 
+GROUPS = [("top", "Top candidates", "Top"), ("watch", "Watch closely", "Watch closely"),
+          ("catalyst", "Catalyst watch", "Catalyst watch"), ("reject", "Reject", "Reject")]
+GROUP_SLUG = {name: slug for slug, name, _ in GROUPS}
+LATEST_SCAN = ROOT / "reports" / "latest-scan.json"
+
 GRID_STYLE = """    <style>
-      .watchlist-card { margin: 0 0 20px; }
-      .report-search { margin: 0 0 16px; }
+      .report-search { margin: 0 0 12px; }
       .report-search input {
         width: 100%; padding: 10px 16px; font: inherit; color: var(--text);
         background: var(--surface); border: 1px solid var(--border); border-radius: 999px;
       }
       .report-search input:focus { outline: 2px solid var(--accent); outline-offset: 1px; }
       .visually-hidden { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
+      .group-filters { display: flex; flex-wrap: wrap; gap: 8px; margin: 0 0 10px; padding: 0; list-style: none; }
+      .group-filters button {
+        padding: 6px 14px; font: inherit; font-size: 0.9rem; color: var(--muted); cursor: pointer;
+        background: var(--surface); border: 1px solid var(--border); border-radius: 999px;
+      }
+      .group-filters button:hover { color: var(--text); }
+      .group-filters button[aria-pressed="true"] { color: var(--text); border-color: var(--accent); font-weight: 600; }
+      .group-filters button:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+      .scan-line { margin: 0 0 18px; font-size: 0.9rem; color: var(--muted); }
       .card .name { margin-top: 2px; font-size: 0.9rem; color: var(--muted); }
+      .card .tags { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 6px; }
+      .card .tags .tag { margin-top: 0; }
+      .card .tag.group { color: var(--accent); border-color: var(--accent); }
       .cards li[hidden], .no-match[hidden] { display: none; }
       .no-match { color: var(--muted); margin: 0 0 40px; }
     </style>
@@ -206,58 +224,97 @@ GRID_STYLE = """    <style>
 GRID_SCRIPT = """    <script>
     (function () {
       var input = document.getElementById('report-search');
+      var buttons = Array.prototype.slice.call(document.querySelectorAll('.group-filters button'));
       var cards = Array.prototype.slice.call(document.querySelectorAll('.stock-cards li'));
       var none = document.querySelector('.no-match');
-      input.addEventListener('input', function () {
+      var group = 'all';
+      function apply() {
         var q = input.value.trim().toLowerCase(), shown = 0;
         cards.forEach(function (c) {
-          var ok = !q || c.getAttribute('data-search').indexOf(q) !== -1;
+          var inGroup = group === 'all' || c.getAttribute('data-group') === group;
+          var ok = inGroup && (!q || c.getAttribute('data-search').indexOf(q) !== -1);
           c.hidden = !ok; if (ok) shown++;
         });
+        none.textContent = q ? 'No reports for that stock yet.' : 'No stocks in this group today.';
         none.hidden = shown > 0;
+      }
+      buttons.forEach(function (b) {
+        b.addEventListener('click', function () {
+          group = b.getAttribute('data-filter');
+          buttons.forEach(function (x) { x.setAttribute('aria-pressed', x === b ? 'true' : 'false'); });
+          apply();
+        });
       });
+      input.addEventListener('input', apply);
     })();
     </script>
 """
 
 
-def stock_card(ticker, name, tag, latest):
+def stock_card(ticker, name, tag, latest, group=None):
     when = f"Latest report: {_long_date(latest['date'])}" if latest else "No report yet"
+    group_tag = f'<span class="tag group">{html.escape(group)}</span>' if group else ""
     return (
-        f'      <li data-search="{html.escape(f"{ticker} {name}".lower())}">\n'
+        f'      <li data-search="{html.escape(f"{ticker} {name}".lower())}" data-group="{GROUP_SLUG.get(group, "")}">\n'
         f'        <a class="card" href="stocks/{html.escape(ticker)}.html">\n'
         f'          <div class="ticker">{html.escape(ticker)}</div>\n'
         f'          <div class="name">{html.escape(name)}</div>\n'
-        f'          <div class="tag">{html.escape(tag)}</div>\n'
+        f'          <div class="tags"><span class="tag">{html.escape(tag)}</span>{group_tag}</div>\n'
         f'          <div class="date">{html.escape(when)}</div>\n'
         f'        </a>\n      </li>\n'
     )
 
 
-def grid_section(stocks, watchlist_date):
-    watch_card = ""
-    if watchlist_date:
-        watch_card = (
-            '    <a class="card watchlist-card" href="reports/watchlist.html">\n'
-            '      <div class="ticker">Daily watchlist</div>\n'
-            '      <div class="tag">Watchlist scan</div>\n'
-            f'      <div class="date">{_long_date(watchlist_date)}</div>\n'
-            '    </a>\n'
-        )
-    cards = "".join(stock_card(s["ticker"], s["name"], s["tag"], s["reports"][0] if s["reports"] else None)
+def scan_line(scan):
+    if not scan:
+        return '    <p class="scan-line">No watchlist scan yet.</p>\n'
+    counts = {name: 0 for _, name, _ in GROUPS}
+    for g in scan["groups"].values():
+        if g in counts:
+            counts[g] += 1
+    d = scan["date"]
+    parts = " · ".join(f"{counts[name]} {short}" for _, name, short in GROUPS)
+    return (f'    <p class="scan-line">Scan of {d:%b} {d.day}: {parts} · '
+            '<a href="reports/watchlist.html">See full scan details</a></p>\n')
+
+
+def grid_section(stocks, scan):
+    groups = scan["groups"] if scan else {}
+    buttons = ['      <li><button type="button" data-filter="all" aria-pressed="true">All</button></li>\n'] + [
+        f'      <li><button type="button" data-filter="{slug}" aria-pressed="false">{name}</button></li>\n'
+        for slug, name, _ in GROUPS]
+    cards = "".join(stock_card(s["ticker"], s["name"], s["tag"], s["reports"][0] if s["reports"] else None,
+                               groups.get(s["ticker"]))
                     for s in stocks)
     return (
         "\n    <!-- Generated by portfolio_page.py in the stock-debate repo. Everything from here to the end of\n"
         "         the main section is rebuilt by the daily watchlist scan, so edits here are overwritten. -->\n"
-        + GRID_STYLE + watch_card
+        + GRID_STYLE
         + '    <div class="report-search">\n'
         '      <label class="visually-hidden" for="report-search">Search by ticker or company</label>\n'
         '      <input id="report-search" type="search" placeholder="Search by ticker or company" autocomplete="off">\n'
         '    </div>\n'
-        '    <ul class="cards stock-cards">\n' + cards + '    </ul>\n'
+        '    <ul class="group-filters" aria-label="Filter by today\'s scan group">\n' + "".join(buttons) + '    </ul>\n'
+        + scan_line(scan)
+        + '    <ul class="cards stock-cards">\n' + cards + '    </ul>\n'
         '    <p class="no-match" hidden>No reports for that stock yet.</p>\n'
         + GRID_SCRIPT
     )
+
+
+def save_scan(scan_date, groups, path=None):
+    """Remembers today's groups so the page can be rebuilt on its own later."""
+    path = path or LATEST_SCAN
+    Path(path).parent.mkdir(exist_ok=True)
+    Path(path).write_text(json.dumps({"date": scan_date.isoformat(), "groups": groups}, indent=1), encoding="utf-8")
+
+
+def load_scan(path=None):
+    path = path or LATEST_SCAN
+    if not Path(path).exists():
+        return None
+    data = json.loads(Path(path).read_text(encoding="utf-8"))
+    return {"date": date.fromisoformat(data["date"]), "groups": data["groups"]}
 
 
 # ---------- stocks/TICKER.html ----------
@@ -412,10 +469,12 @@ def stock_page(stock, today, chrome):
 
 
 def build(portfolio=PORTFOLIO_DIR, today=None, prices=None, names=None, download=None,
-          fetch_names=None, watchlist=None):
+          fetch_names=None, watchlist=None, scan=None):
     """Rebuilds reports.html and every stocks/TICKER.html. prices is an optional
     {ticker: candles} dict and names an optional {ticker: company name} dict already
-    fetched (for example by the watchlist scan); anything missing is downloaded."""
+    fetched (for example by the watchlist scan); anything missing is downloaded.
+    scan is {"date": date, "groups": {ticker: group}} from today's scan; if it is not
+    given, the last saved scan (reports/latest-scan.json) is used."""
     portfolio = Path(portfolio)
     today = today or datetime.now(ZoneInfo("America/Los_Angeles")).date()
     page_file, reports_dir, stocks_dir = portfolio / "reports.html", portfolio / "reports", portfolio / "stocks"
@@ -454,14 +513,11 @@ def build(portfolio=PORTFOLIO_DIR, today=None, prices=None, names=None, download
     stocks.sort(key=lambda s: (0, -s["reports"][0]["date"].toordinal(), s["ticker"]) if s["reports"]
                 else (1, 0, s["ticker"]))
 
-    scans = sorted(reports_dir.glob("watchlist-*.html"))
-    watchlist_date = None
-    if (reports_dir / "watchlist.html").exists() and scans:
-        watchlist_date = date.fromisoformat(scans[-1].stem.replace("watchlist-", ""))
+    scan = scan if scan is not None else load_scan()
 
     top = page[: page.index(HEADER_END) + len(HEADER_END)]
     bottom = page[page.index(MAIN_END):]
-    new_page = top + grid_section(stocks, watchlist_date) + bottom
+    new_page = top + grid_section(stocks, scan) + bottom
     page_file.write_text(new_page, encoding="utf-8", newline="")
 
     stocks_dir.mkdir(exist_ok=True)
