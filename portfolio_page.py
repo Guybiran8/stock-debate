@@ -1,16 +1,20 @@
-"""Builds ../portfolio/reports.html.
+"""Builds the portfolio's reports pages. Pure code, no AI, no cost.
 
-The page has the daily watchlist card pinned on top, a search bar, and one block per stock
-that has an AI report in ../portfolio/reports/. Each block shows:
-- "Chart today (updated daily)": candles, 20/50/200-day averages, nearby support and
-  resistance, and a one-line status. Pure code from Yahoo prices, no AI, no cost.
-- "Latest AI report" with its date and age. Short-term reports older than STALE_SHORT_DAYS
-  are marked "may be out of date". The age is recomputed in the browser, so it stays right
-  even on days the scan does not run.
-- "Older reports", newest first.
+reports.html: the daily watchlist card pinned on top, a search bar, and one compact card per
+stock (every ticker in watchlist.txt plus any stock with a report in ../portfolio/reports/).
+Each card shows the ticker, company name, a short status tag from today's prices, and the
+latest AI report date or "No report yet". Only the part between the page's </header> and
+</main> is generated; the nav, intro and footer are kept exactly as they are.
 
-Only the part between the page's </header> and </main> is generated. The nav, intro and
-footer are kept exactly as they are. Run "python portfolio_page.py" to rebuild it alone.
+stocks/TICKER.html: one page per card with the daily chart (20/50/200-day averages, nearby
+support and resistance), the status line, the latest AI report with its age (short-term
+reports older than STALE_SHORT_DAYS are marked "may be out of date"), and older reports.
+Report ages are recomputed in the browser, so they stay right on days the scan does not run.
+
+STATUS TAG (first that applies): No chart data, At highs, Downtrend, Below 200-day,
+Below 50-day, Uptrend, Mixed.
+
+Run "python portfolio_page.py" to rebuild the pages alone.
 """
 import html
 import json
@@ -23,6 +27,7 @@ from chart import find_levels, nearby_levels, sma_series, trend_label
 
 ROOT = Path(__file__).parent
 PORTFOLIO_DIR = ROOT.parent / "portfolio"
+WATCHLIST_FILE = ROOT / "watchlist.txt"
 REPORT_NAME = re.compile(r"^([A-Z][A-Z0-9.\-]*)-(short|long)-(\d{4}-\d{2}-\d{2})\.html$")
 STALE_SHORT_DAYS = 5
 CHART_DAYS = 250
@@ -31,6 +36,7 @@ HEAVY_VOLUME = 2.0      # 2x the 20-day average
 HEADER_END = "    </header>\n"
 MAIN_END = "  </main>"
 HORIZON_LABEL = {"short": "Short-term trade", "long": "Long-term hold"}
+LIB = "https://unpkg.com/lightweight-charts@4.2.0/dist/lightweight-charts.standalone.production.js"
 
 
 def find_reports(reports_dir):
@@ -48,6 +54,17 @@ def find_reports(reports_dir):
     for reports in out.values():
         reports.sort(key=lambda r: (r["date"], r["horizon"] == "short"), reverse=True)
     return out
+
+
+def load_watchlist(path=WATCHLIST_FILE):
+    if not Path(path).exists():
+        return []
+    seen = []
+    for t in Path(path).read_text(encoding="utf-8").split():
+        t = t.strip().upper()
+        if t and t not in seen:
+            seen.append(t)
+    return seen
 
 
 def _r(x):
@@ -94,8 +111,23 @@ def todays_events(daily, ma20):
     return events
 
 
+def status_tag(price, ma50, ma200, at_highs):
+    if at_highs:
+        return "At highs"
+    trend = trend_label(price, ma50, ma200).split(":")[0] if ma200 else ""
+    if trend == "Downtrend":
+        return "Downtrend"
+    if ma200 and price < ma200:
+        return "Below 200-day"
+    if ma50 and price < ma50:
+        return "Below 50-day"
+    if trend == "Uptrend":
+        return "Uptrend"
+    return "Mixed"
+
+
 def chart_data(daily):
-    """Chart series and status for one stock. daily is a list of {d, o, h, l, c, v}, oldest first."""
+    """Chart series, status line and tag for one stock. daily is a list of {d, o, h, l, c, v}, oldest first."""
     if len(daily) < 30:
         return None
     closes = [c["c"] for c in daily]
@@ -131,6 +163,7 @@ def chart_data(daily):
         "candles": [[day(i), _r(daily[i]["o"]), _r(daily[i]["h"]), _r(daily[i]["l"]), _r(daily[i]["c"])] for i in show],
         "ma20": line(ma20), "ma50": line(ma50), "ma200": line(ma200),
         "levels": levels, "status": status, "asOf": daily[-1]["d"].isoformat(),
+        "tag": status_tag(price, ma50[-1], ma200[-1], lv["at_highs"]),
     }
 
 
@@ -142,175 +175,66 @@ def _age_text(days):
     return "today" if days <= 0 else "1 day old" if days == 1 else f"{days} days old"
 
 
-def _report_link(r, today, latest=False):
+def _report_link(r, today, latest=False, prefix="../reports/"):
     days = (today - r["date"]).days
     stale = r["horizon"] == "short" and days > STALE_SHORT_DAYS
     label = f"{HORIZON_LABEL[r['horizon']]} · {_long_date(r['date'])}"
-    out = (f'<a href="reports/{html.escape(r["file"])}">{html.escape(label)}</a> '
+    out = (f'<a href="{prefix}{html.escape(r["file"])}">{html.escape(label)}</a> '
            f'<span class="age" data-date="{r["date"].isoformat()}" data-horizon="{r["horizon"]}">({_age_text(days)})</span>')
     if latest:
         out += f' <span class="stale"{"" if stale else " hidden"}>may be out of date</span>'
     return out
 
 
-def stock_block(ticker, reports, chart, today):
-    name = next((r["name"] for r in reports if r["name"]), "")
-    search = f"{ticker} {name}".lower()
-    if chart:
-        as_of = date.fromisoformat(chart["asOf"])
-        chart_html = (
-            f'      <div class="chart" data-ticker="{html.escape(ticker)}" role="img" '
-            f'aria-label="{html.escape(ticker)} daily candles for the last 12 months"></div>\n'
-            '      <div class="legend"><span><i class="swatch ma20"></i>20-day</span>'
-            '<span><i class="swatch ma50"></i>50-day</span><span><i class="swatch ma200"></i>200-day</span>'
-            '<span><i class="swatch sup"></i>Support</span><span><i class="swatch res"></i>Resistance</span></div>\n'
-            f'      <p class="status">{html.escape(chart["status"])} '
-            f'<span class="asof">(as of {as_of:%b} {as_of.day})</span></p>\n'
-        )
-    else:
-        chart_html = '      <p class="status">Chart data is not available today.</p>\n'
-    older = reports[1:]
-    if older:
-        items = "".join(f"<li>{_report_link(r, today)}</li>" for r in older)
-        older_html = f'      <details class="older"><summary>Older reports ({len(older)})</summary><ul>{items}</ul></details>\n'
-    else:
-        older_html = '      <p class="muted">No older reports yet.</p>\n'
-    return (
-        f'    <section class="stock" id="stock-{html.escape(ticker)}" data-search="{html.escape(search)}">\n'
-        f'      <div class="stock-head"><span class="ticker">{html.escape(ticker)}</span>'
-        f'<span class="name">{html.escape(name)}</span></div>\n'
-        '      <h3>Chart today (updated daily)</h3>\n'
-        + chart_html
-        + '      <h3>Latest AI report</h3>\n'
-        f'      <p class="latest">{_report_link(reports[0], today, latest=True)}</p>\n'
-        '      <h3>Older reports</h3>\n'
-        + older_html
-        + '    </section>\n'
-    )
+# ---------- reports.html (card grid) ----------
 
-
-STYLE = """    <style>
+GRID_STYLE = """    <style>
       .watchlist-card { margin: 0 0 20px; }
-      .report-search { margin: 0 0 8px; }
+      .report-search { margin: 0 0 16px; }
       .report-search input {
         width: 100%; padding: 10px 16px; font: inherit; color: var(--text);
         background: var(--surface); border: 1px solid var(--border); border-radius: 999px;
       }
       .report-search input:focus { outline: 2px solid var(--accent); outline-offset: 1px; }
       .visually-hidden { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
-      .no-match { color: var(--muted); margin: 16px 0; }
-      .stock { background: var(--surface); border: 1px solid var(--border); border-radius: 12px; padding: 20px; margin: 16px 0; }
-      .stock[hidden], .no-match[hidden], .stale[hidden] { display: none; }
-      .stock-head { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 10px; }
-      .stock-head .ticker { font-size: 1.4rem; font-weight: 700; }
-      .stock-head .name { color: var(--muted); }
-      .stock h3 { font-size: 0.8rem; font-weight: 700; letter-spacing: 0.06em; text-transform: uppercase; color: var(--muted); margin: 18px 0 8px; }
-      .chart { width: 100%; height: 300px; }
-      .legend { display: flex; flex-wrap: wrap; gap: 4px 14px; margin-top: 6px; font-size: 0.8rem; color: var(--muted); }
-      .swatch { display: inline-block; width: 14px; height: 3px; margin-right: 5px; vertical-align: middle; border-radius: 2px; }
-      .swatch.ma20 { background: #a259d9; }
-      .swatch.ma50 { background: var(--accent); }
-      .swatch.ma200 { background: #f59f00; }
-      .swatch.sup { border-top: 2px dashed #2e9e4f; height: 0; }
-      .swatch.res { border-top: 2px dashed #e04848; height: 0; }
-      .status { margin: 10px 0 0; font-size: 0.95rem; }
-      .asof, .age, .muted { color: var(--muted); }
-      .latest, .muted { margin: 0; }
-      .stale { margin-left: 4px; padding: 1px 8px; font-size: 0.8rem; font-weight: 600; color: var(--todo-text); background: var(--todo-bg); border: 1px solid var(--todo-border); border-radius: 999px; }
-      .older summary { cursor: pointer; color: var(--muted); }
-      .older ul { margin: 8px 0 0; padding-left: 20px; }
-      @media (max-width: 480px) {
-        .stock { padding: 14px; }
-        .chart { height: 240px; }
-      }
+      .card .name { margin-top: 2px; font-size: 0.9rem; color: var(--muted); }
+      .cards li[hidden], .no-match[hidden] { display: none; }
+      .no-match { color: var(--muted); margin: 0 0 40px; }
     </style>
 """
 
-SCRIPT = """    <script>
+GRID_SCRIPT = """    <script>
     (function () {
-      // Report ages, recomputed with the viewer's date.
-      var today = new Date(); today.setHours(0, 0, 0, 0);
-      document.querySelectorAll('.age').forEach(function (el) {
-        var p = el.getAttribute('data-date').split('-');
-        var days = Math.round((today - new Date(+p[0], +p[1] - 1, +p[2])) / 86400000);
-        el.textContent = '(' + (days <= 0 ? 'today' : days === 1 ? '1 day old' : days + ' days old') + ')';
-        var flag = el.parentNode.querySelector('.stale');
-        if (flag) flag.hidden = !(el.getAttribute('data-horizon') === 'short' && days > %STALE%);
-      });
-
-      // Search by ticker or company name.
       var input = document.getElementById('report-search');
-      var blocks = Array.prototype.slice.call(document.querySelectorAll('.stock'));
+      var cards = Array.prototype.slice.call(document.querySelectorAll('.stock-cards li'));
       var none = document.querySelector('.no-match');
       input.addEventListener('input', function () {
         var q = input.value.trim().toLowerCase(), shown = 0;
-        blocks.forEach(function (b) {
-          var ok = !q || b.getAttribute('data-search').indexOf(q) !== -1;
-          b.hidden = !ok; if (ok) shown++;
+        cards.forEach(function (c) {
+          var ok = !q || c.getAttribute('data-search').indexOf(q) !== -1;
+          c.hidden = !ok; if (ok) shown++;
         });
         none.hidden = shown > 0;
       });
-
-      // Charts, drawn when they scroll into view and recolored when the theme changes.
-      var data = window.CHART_DATA || {}, drawn = [];
-      function css(name) { return getComputedStyle(document.documentElement).getPropertyValue(name).trim(); }
-      function theme() {
-        return {
-          layout: { background: { color: css('--surface') }, textColor: css('--muted') },
-          grid: { vertLines: { color: css('--border') }, horzLines: { color: css('--border') } }
-        };
-      }
-      function pts(rows) { return rows.map(function (r) { return { time: r[0], value: r[1] }; }); }
-      function draw(el) {
-        var d = data[el.getAttribute('data-ticker')];
-        if (!d || !window.LightweightCharts) return;
-        var chart = LightweightCharts.createChart(el, Object.assign({
-          autoSize: true,
-          rightPriceScale: { borderVisible: false },
-          timeScale: { borderVisible: false },
-          handleScroll: { mouseWheel: false, pressedMouseMove: true, horzTouchDrag: true, vertTouchDrag: false },
-          handleScale: { mouseWheel: false, pinch: true, axisPressedMouseMove: true }
-        }, theme()));
-        var candles = chart.addCandlestickSeries({
-          upColor: '#2e9e4f', downColor: '#e04848', borderVisible: false,
-          wickUpColor: '#2e9e4f', wickDownColor: '#e04848'
-        });
-        candles.setData(d.candles.map(function (c) { return { time: c[0], open: c[1], high: c[2], low: c[3], close: c[4] }; }));
-        var opts = { lineWidth: 1, priceLineVisible: false, lastValueVisible: false, crosshairMarkerVisible: false };
-        chart.addLineSeries(Object.assign({ color: '#a259d9' }, opts)).setData(pts(d.ma20));
-        var ma50 = chart.addLineSeries(Object.assign({ color: css('--accent') }, opts));
-        ma50.setData(pts(d.ma50));
-        chart.addLineSeries(Object.assign({ color: '#f59f00' }, opts)).setData(pts(d.ma200));
-        d.levels.forEach(function (l) {
-          candles.createPriceLine({ price: l.price, color: l.kind === 'support' ? '#2e9e4f' : '#e04848',
-                                    lineWidth: 1, lineStyle: 2, axisLabelVisible: true, title: l.title });
-        });
-        chart.timeScale().fitContent();
-        drawn.push({ chart: chart, ma50: ma50 });
-      }
-      var els = document.querySelectorAll('.chart');
-      if ('IntersectionObserver' in window) {
-        var io = new IntersectionObserver(function (entries) {
-          entries.forEach(function (e) { if (e.isIntersecting) { io.unobserve(e.target); draw(e.target); } });
-        }, { rootMargin: '200px' });
-        els.forEach(function (el) { io.observe(el); });
-      } else {
-        els.forEach(draw);
-      }
-      if (window.matchMedia) {
-        var mq = window.matchMedia('(prefers-color-scheme: dark)');
-        var recolor = function () {
-          drawn.forEach(function (x) { x.chart.applyOptions(theme()); x.ma50.applyOptions({ color: css('--accent') }); });
-        };
-        if (mq.addEventListener) mq.addEventListener('change', recolor); else if (mq.addListener) mq.addListener(recolor);
-      }
     })();
     </script>
-""".replace("%STALE%", str(STALE_SHORT_DAYS))
+"""
 
 
-def build_section(reports, charts, today, watchlist_date):
-    order = sorted(reports, key=lambda t: (-reports[t][0]["date"].toordinal(), t))
+def stock_card(ticker, name, tag, latest):
+    when = f"Latest report: {_long_date(latest['date'])}" if latest else "No report yet"
+    return (
+        f'      <li data-search="{html.escape(f"{ticker} {name}".lower())}">\n'
+        f'        <a class="card" href="stocks/{html.escape(ticker)}.html">\n'
+        f'          <div class="ticker">{html.escape(ticker)}</div>\n'
+        f'          <div class="name">{html.escape(name)}</div>\n'
+        f'          <div class="tag">{html.escape(tag)}</div>\n'
+        f'          <div class="date">{html.escape(when)}</div>\n'
+        f'        </a>\n      </li>\n'
+    )
+
+
+def grid_section(stocks, watchlist_date):
     watch_card = ""
     if watchlist_date:
         watch_card = (
@@ -320,43 +244,215 @@ def build_section(reports, charts, today, watchlist_date):
             f'      <div class="date">{_long_date(watchlist_date)}</div>\n'
             '    </a>\n'
         )
-    blocks = "".join(stock_block(t, reports[t], charts.get(t), today) for t in order)
+    cards = "".join(stock_card(s["ticker"], s["name"], s["tag"], s["reports"][0] if s["reports"] else None)
+                    for s in stocks)
     return (
         "\n    <!-- Generated by portfolio_page.py in the stock-debate repo. Everything from here to the end of\n"
         "         the main section is rebuilt by the daily watchlist scan, so edits here are overwritten. -->\n"
-        + STYLE
-        + watch_card
+        + GRID_STYLE + watch_card
         + '    <div class="report-search">\n'
-        '      <label class="visually-hidden" for="report-search">Search reports by ticker or company</label>\n'
+        '      <label class="visually-hidden" for="report-search">Search by ticker or company</label>\n'
         '      <input id="report-search" type="search" placeholder="Search by ticker or company" autocomplete="off">\n'
         '    </div>\n'
+        '    <ul class="cards stock-cards">\n' + cards + '    </ul>\n'
         '    <p class="no-match" hidden>No reports for that stock yet.</p>\n'
-        + blocks
-        + '    <script src="https://unpkg.com/lightweight-charts@4.2.0/dist/lightweight-charts.standalone.production.js"></script>\n'
-        f'    <script src="reports/charts-data.js?v={today.isoformat()}"></script>\n'
-        + SCRIPT
+        + GRID_SCRIPT
     )
 
 
-def build(portfolio=PORTFOLIO_DIR, today=None, prices=None, download=None):
-    """Rebuilds reports.html and reports/charts-data.js. prices is an optional
-    {ticker: candles} dict already downloaded (for example by the watchlist scan)."""
+# ---------- stocks/TICKER.html ----------
+
+STOCK_STYLE = """  <style>
+    .back { display: inline-block; margin: 28px 0 0; color: var(--muted); text-decoration: none; }
+    .back:hover { color: var(--text); }
+    .stock-intro { padding-block: 16px 8px; }
+    .stock-intro h1 { margin-bottom: 2px; }
+    .stock-intro .name { color: var(--muted); margin: 0; }
+    .stock-intro .tag { display: inline-block; margin-top: 10px; padding: 2px 10px; border-radius: 999px; border: 1px solid var(--border); font-size: 0.85rem; color: var(--muted); }
+    .panel { background: var(--surface); border: 1px solid var(--border); border-radius: 12px; padding: 20px; margin: 16px 0; }
+    .panel h2 { font-size: 0.8rem; font-weight: 700; letter-spacing: 0.06em; text-transform: uppercase; color: var(--muted); margin: 0 0 10px; }
+    .chart { width: 100%; height: 340px; }
+    .legend { display: flex; flex-wrap: wrap; gap: 4px 14px; margin-top: 6px; font-size: 0.8rem; color: var(--muted); }
+    .swatch { display: inline-block; width: 14px; height: 3px; margin-right: 5px; vertical-align: middle; border-radius: 2px; }
+    .swatch.ma20 { background: #a259d9; }
+    .swatch.ma50 { background: var(--accent); }
+    .swatch.ma200 { background: #f59f00; }
+    .swatch.sup { border-top: 2px dashed #2e9e4f; height: 0; }
+    .swatch.res { border-top: 2px dashed #e04848; height: 0; }
+    .status { margin: 12px 0 0; }
+    .asof, .age, .muted { color: var(--muted); }
+    .panel p { margin: 0; }
+    .stale { margin-left: 4px; padding: 1px 8px; font-size: 0.8rem; font-weight: 600; color: var(--todo-text); background: var(--todo-bg); border: 1px solid var(--todo-border); border-radius: 999px; }
+    .stale[hidden] { display: none; }
+    .older summary { cursor: pointer; color: var(--muted); }
+    .older ul { margin: 8px 0 0; padding-left: 20px; }
+    @media (max-width: 480px) {
+      .panel { padding: 14px; }
+      .chart { height: 260px; }
+    }
+  </style>
+"""
+
+STOCK_SCRIPT = """  <script>
+  (function () {
+    // Report ages, recomputed with the viewer's date.
+    var today = new Date(); today.setHours(0, 0, 0, 0);
+    document.querySelectorAll('.age').forEach(function (el) {
+      var p = el.getAttribute('data-date').split('-');
+      var days = Math.round((today - new Date(+p[0], +p[1] - 1, +p[2])) / 86400000);
+      el.textContent = '(' + (days <= 0 ? 'today' : days === 1 ? '1 day old' : days + ' days old') + ')';
+      var flag = el.parentNode.querySelector('.stale');
+      if (flag) flag.hidden = !(el.getAttribute('data-horizon') === 'short' && days > %STALE%);
+    });
+
+    var d = window.CHART, el = document.querySelector('.chart');
+    if (!d || !el || !window.LightweightCharts) return;
+    function css(name) { return getComputedStyle(document.documentElement).getPropertyValue(name).trim(); }
+    function theme() {
+      return {
+        layout: { background: { color: css('--surface') }, textColor: css('--muted') },
+        grid: { vertLines: { color: css('--border') }, horzLines: { color: css('--border') } }
+      };
+    }
+    function pts(rows) { return rows.map(function (r) { return { time: r[0], value: r[1] }; }); }
+    var chart = LightweightCharts.createChart(el, Object.assign({
+      autoSize: true,
+      rightPriceScale: { borderVisible: false },
+      timeScale: { borderVisible: false },
+      handleScroll: { mouseWheel: false, pressedMouseMove: true, horzTouchDrag: true, vertTouchDrag: false },
+      handleScale: { mouseWheel: false, pinch: true, axisPressedMouseMove: true }
+    }, theme()));
+    var candles = chart.addCandlestickSeries({
+      upColor: '#2e9e4f', downColor: '#e04848', borderVisible: false,
+      wickUpColor: '#2e9e4f', wickDownColor: '#e04848'
+    });
+    candles.setData(d.candles.map(function (c) { return { time: c[0], open: c[1], high: c[2], low: c[3], close: c[4] }; }));
+    var opts = { lineWidth: 1, priceLineVisible: false, lastValueVisible: false, crosshairMarkerVisible: false };
+    chart.addLineSeries(Object.assign({ color: '#a259d9' }, opts)).setData(pts(d.ma20));
+    var ma50 = chart.addLineSeries(Object.assign({ color: css('--accent') }, opts));
+    ma50.setData(pts(d.ma50));
+    chart.addLineSeries(Object.assign({ color: '#f59f00' }, opts)).setData(pts(d.ma200));
+    d.levels.forEach(function (l) {
+      candles.createPriceLine({ price: l.price, color: l.kind === 'support' ? '#2e9e4f' : '#e04848',
+                                lineWidth: 1, lineStyle: 2, axisLabelVisible: true, title: l.title });
+    });
+    chart.timeScale().fitContent();
+    if (window.matchMedia) {
+      var mq = window.matchMedia('(prefers-color-scheme: dark)');
+      var recolor = function () { chart.applyOptions(theme()); ma50.applyOptions({ color: css('--accent') }); };
+      if (mq.addEventListener) mq.addEventListener('change', recolor); else if (mq.addListener) mq.addListener(recolor);
+    }
+  })();
+  </script>
+""".replace("%STALE%", str(STALE_SHORT_DAYS))
+
+
+def _one_level_up(fragment):
+    # Relative links in the copied nav and footer need "../" from inside stocks/.
+    return re.sub(r'href="(?!https?:|mailto:|#|/|\.\./)([^"]+)"', r'href="../\1"', fragment)
+
+
+def site_chrome(reports_page):
+    """Head bits, nav and footer copied from reports.html so stock pages match the site."""
+    nav = re.search(r"  <nav class=\"nav\">.*?</nav>\n", reports_page, re.S)
+    footer = re.search(r"  <footer>.*?</footer>\n", reports_page, re.S)
+    title = re.search(r"<title>(.*?)</title>", reports_page, re.S)
+    site = title.group(1).split("·")[-1].strip() if title else ""
+    return (_one_level_up(nav.group(0)) if nav else "", _one_level_up(footer.group(0)) if footer else "", site)
+
+
+def stock_page(stock, today, chrome):
+    nav, footer, site = chrome
+    ticker, name, chart, reports = stock["ticker"], stock["name"], stock["chart"], stock["reports"]
+    title = f"{ticker} · {site}" if site else ticker
+    if chart:
+        as_of = date.fromisoformat(chart["asOf"])
+        chart_html = (
+            f'      <div class="chart" role="img" aria-label="{html.escape(ticker)} daily candles for the last 12 months"></div>\n'
+            '      <div class="legend"><span><i class="swatch ma20"></i>20-day</span>'
+            '<span><i class="swatch ma50"></i>50-day</span><span><i class="swatch ma200"></i>200-day</span>'
+            '<span><i class="swatch sup"></i>Support</span><span><i class="swatch res"></i>Resistance</span></div>\n'
+            f'      <p class="status">{html.escape(chart["status"])} <span class="asof">(as of {as_of:%b} {as_of.day})</span></p>\n'
+        )
+        data = json.dumps(chart, separators=(",", ":")).replace("</", "<\\/")
+        scripts = f'  <script src="{LIB}"></script>\n  <script>window.CHART = {data};</script>\n'
+    else:
+        chart_html = '      <p class="status">Chart data is not available today.</p>\n'
+        scripts = ""
+    if reports:
+        latest = f"      <p>{_report_link(reports[0], today, latest=True)}</p>\n"
+    else:
+        latest = '      <p class="muted">No AI report yet.</p>\n'
+    older = reports[1:]
+    if older:
+        items = "".join(f"<li>{_report_link(r, today)}</li>" for r in older)
+        older_html = f'      <details class="older"><summary>Older reports ({len(older)})</summary><ul>{items}</ul></details>\n'
+    else:
+        older_html = '      <p class="muted">No older reports yet.</p>\n'
+    return (
+        '<!DOCTYPE html>\n<html lang="en">\n<head>\n  <meta charset="utf-8">\n'
+        '  <meta name="viewport" content="width=device-width, initial-scale=1">\n'
+        f'  <title>{html.escape(title)}</title>\n  <link rel="stylesheet" href="../style.css">\n'
+        + STOCK_STYLE + '</head>\n<body>\n'
+        '  <!-- Generated by portfolio_page.py in the stock-debate repo. Rebuilt by the daily scan. -->\n'
+        + nav
+        + '\n  <main class="wrap">\n'
+        '    <a class="back" href="../reports.html">&larr; All reports</a>\n'
+        '    <header class="stock-intro">\n'
+        f'      <h1>{html.escape(ticker)}</h1>\n'
+        f'      <p class="name">{html.escape(name)}</p>\n'
+        f'      <div class="tag">{html.escape(stock["tag"])}</div>\n'
+        '    </header>\n'
+        '    <section class="panel">\n      <h2>Chart today (updated daily)</h2>\n' + chart_html + '    </section>\n'
+        '    <section class="panel">\n      <h2>Latest AI report</h2>\n' + latest + '    </section>\n'
+        '    <section class="panel">\n      <h2>Older reports</h2>\n' + older_html + '    </section>\n'
+        '  </main>\n\n'
+        + footer + scripts + STOCK_SCRIPT + '</body>\n</html>\n'
+    )
+
+
+def build(portfolio=PORTFOLIO_DIR, today=None, prices=None, names=None, download=None,
+          fetch_names=None, watchlist=None):
+    """Rebuilds reports.html and every stocks/TICKER.html. prices is an optional
+    {ticker: candles} dict and names an optional {ticker: company name} dict already
+    fetched (for example by the watchlist scan); anything missing is downloaded."""
     portfolio = Path(portfolio)
     today = today or datetime.now(ZoneInfo("America/Los_Angeles")).date()
-    page_file, reports_dir = portfolio / "reports.html", portfolio / "reports"
+    page_file, reports_dir, stocks_dir = portfolio / "reports.html", portfolio / "reports", portfolio / "stocks"
     page = page_file.read_text(encoding="utf-8")
     if page.count(HEADER_END) != 1 or page.count(MAIN_END) != 1:
         raise RuntimeError("reports.html layout changed, so it was not rebuilt.")
 
     reports = find_reports(reports_dir)
+    watch = load_watchlist() if watchlist is None else watchlist
+    tickers = list(dict.fromkeys(watch + sorted(reports)))
+
     prices = dict(prices or {})
-    missing = [t for t in reports if not prices.get(t)]
+    missing = [t for t in tickers if not prices.get(t)]
     if missing:
         if download is None:
             from watchlist import download_prices as download
         prices.update(download(missing))
-    charts = {t: chart_data(prices[t]) for t in reports if prices.get(t)}
-    charts = {t: c for t, c in charts.items() if c}
+
+    names = dict(names or {})
+    for t, rs in reports.items():
+        if rs[0]["name"]:
+            names[t] = rs[0]["name"]
+    need = [t for t in tickers if not names.get(t)]
+    if need:
+        if fetch_names is None:
+            from watchlist import fetch_profiles
+            fetch_names = lambda ts: {t: p.get("name") for t, p in fetch_profiles(ts).items()}  # noqa: E731
+        names.update({t: n for t, n in fetch_names(need).items() if n})
+
+    stocks = []
+    for t in tickers:
+        chart = chart_data(prices[t]) if prices.get(t) else None
+        stocks.append({"ticker": t, "name": names.get(t) or "", "chart": chart,
+                       "tag": chart["tag"] if chart else "No chart data", "reports": reports.get(t, [])})
+    # Stocks with reports first (newest report first), then the rest by ticker.
+    stocks.sort(key=lambda s: (0, -s["reports"][0]["date"].toordinal(), s["ticker"]) if s["reports"]
+                else (1, 0, s["ticker"]))
 
     scans = sorted(reports_dir.glob("watchlist-*.html"))
     watchlist_date = None
@@ -365,12 +461,25 @@ def build(portfolio=PORTFOLIO_DIR, today=None, prices=None, download=None):
 
     top = page[: page.index(HEADER_END) + len(HEADER_END)]
     bottom = page[page.index(MAIN_END):]
-    page_file.write_text(top + build_section(reports, charts, today, watchlist_date) + bottom,
-                         encoding="utf-8", newline="")
-    (reports_dir / "charts-data.js").write_text(
-        "window.CHART_DATA = " + json.dumps(charts, separators=(",", ":")) + ";\n", encoding="utf-8")
-    return {"blocks": sorted(reports), "charts": sorted(charts),
-            "no_chart": sorted(set(reports) - set(charts))}
+    new_page = top + grid_section(stocks, watchlist_date) + bottom
+    page_file.write_text(new_page, encoding="utf-8", newline="")
+
+    stocks_dir.mkdir(exist_ok=True)
+    chrome = site_chrome(new_page)
+    keep = set()
+    for s in stocks:
+        f = stocks_dir / f"{s['ticker']}.html"
+        f.write_text(stock_page(s, today, chrome), encoding="utf-8", newline="")
+        keep.add(f.name)
+    for old in stocks_dir.glob("*.html"):
+        if old.name not in keep:
+            old.unlink()
+    old_data = reports_dir / "charts-data.js"   # used by the previous design
+    if old_data.exists():
+        old_data.unlink()
+    return {"cards": [s["ticker"] for s in stocks],
+            "no_chart": [s["ticker"] for s in stocks if not s["chart"]],
+            "no_name": [s["ticker"] for s in stocks if not s["name"]]}
 
 
 if __name__ == "__main__":

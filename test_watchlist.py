@@ -172,15 +172,19 @@ class WatchlistTest(unittest.TestCase):
         self.assertIn("0 Top candidates today, so no full reports were run.", page)
 
     def test_portfolio_page_rebuild(self):
-        top = ('<!DOCTYPE html>\n<html>\n<head><link rel="stylesheet" href="style.css"></head>\n<body>\n'
-               '  <nav>Guy Biran</nav>\n  <main class="wrap">\n    <header class="intro">\n'
-               '      <h1>Example reports</h1>\n    </header>\n')
-        bottom = '  </main>\n  <footer>Guy Biran</footer>\n</body>\n</html>\n'
-        old_middle = '    <ul class="cards"><li>old card</li></ul>\n'
+        top = ('<!DOCTYPE html>\n<html>\n<head>\n  <title>Reports · Guy Biran</title>\n'
+               '  <link rel="stylesheet" href="style.css">\n</head>\n<body>\n'
+               '  <nav class="nav">\n    <a class="home" href="index.html">Guy Biran</a>\n'
+               '    <a href="reports.html" aria-current="page">Reports</a>\n'
+               '    <a href="https://github.com/Guybiran8">GitHub</a>\n  </nav>\n'
+               '  <main class="wrap">\n    <header class="intro">\n      <h1>Example reports</h1>\n    </header>\n')
+        bottom = '  </main>\n  <footer>\n    <div class="wrap">Guy Biran</div>\n  </footer>\n</body>\n</html>\n'
         with tempfile.TemporaryDirectory() as d:
             port = Path(d)
             (port / "reports").mkdir()
-            (port / "reports.html").write_text(top + old_middle + bottom, encoding="utf-8")
+            (port / "stocks").mkdir()
+            (port / "stocks" / "GONE.html").write_text("old page", encoding="utf-8")
+            (port / "reports.html").write_text(top + '    <ul class="cards"><li>old card</li></ul>\n' + bottom, encoding="utf-8")
             files = {"NVDA-short-2026-10-13.html": "NVIDIA Corporation (NVDA)",
                      "NVDA-short-2026-10-01.html": "NVIDIA Corporation (NVDA)",
                      "NVDA-long-2026-09-20.html": "NVIDIA Corporation (NVDA)",
@@ -189,47 +193,79 @@ class WatchlistTest(unittest.TestCase):
             for name, title in files.items():
                 (port / "reports" / name).write_text(f"<html><head><title>{title}</title></head></html>", encoding="utf-8")
 
-            asked = []
+            asked, named = [], []
 
             def download(tickers):
                 asked.extend(tickers)
-                return {t: fake_candles(t) for t in tickers}
+                return {t: fake_candles(t) for t in tickers if t != "NODATA"}
 
-            built = w_page.build(port, TODAY, prices={"NVDA": fake_candles("nvda")}, download=download)
+            def fetch_names(tickers):
+                named.extend(tickers)
+                return {"NODATA": "No Data Inc"}
+
+            built = w_page.build(port, TODAY, prices={"NVDA": fake_candles("nvda")}, names={"SOFI": "SoFi Technologies"},
+                                 download=download, fetch_names=fetch_names, watchlist=["SOFI", "NVDA", "NODATA"])
             page = (port / "reports.html").read_text(encoding="utf-8")
 
-            self.assertEqual(asked, ["KO"])                         # KO is not on the watchlist; NVDA was already loaded
-            self.assertEqual(built["charts"], ["KO", "NVDA"])
+            self.assertEqual(sorted(asked), ["KO", "NODATA", "SOFI"])   # NVDA prices were already loaded
+            self.assertEqual(named, ["NODATA"])                          # report titles and the scan gave the rest
+            self.assertEqual(built["cards"], ["KO", "NVDA", "NODATA", "SOFI"])   # newest reports first, then A-Z
+            self.assertEqual(built["no_chart"], ["NODATA"])
             self.assertTrue(page.startswith(top) and page.endswith(bottom))
             self.assertNotIn("old card", page)
             self.assertLess(page.index("Daily watchlist"), page.index('id="report-search"'))
-            self.assertLess(page.index('id="report-search"'), page.index('class="stock"'))
+            self.assertLess(page.index('id="report-search"'), page.index('class="cards stock-cards"'))
             self.assertIn("No reports for that stock yet.", page)
-            self.assertIn('data-search="nvda nvidia corporation"', page)
-            self.assertIn('data-search="ko the coca-cola company"', page)
-            self.assertIn("Chart today (updated daily)", page)
 
-            nvda = page[page.index('id="stock-NVDA"'):]
-            nvda = nvda[:nvda.index("</section>")]
+            def card(t):
+                c = page[page.index(f'href="stocks/{t}.html"'):]
+                return c[:c.index("</li>")]
+            self.assertIn("NVIDIA Corporation", card("NVDA"))
+            self.assertIn("Latest report: October 13, 2026", card("NVDA"))
+            self.assertIn("SoFi Technologies", card("SOFI"))
+            self.assertIn("No report yet", card("SOFI"))
+            self.assertIn("No chart data", card("NODATA"))
+            for t in ["KO", "NVDA", "SOFI"]:
+                self.assertRegex(card(t), r'<div class="tag">(At highs|Downtrend|Below 200-day|Below 50-day|Uptrend|Mixed)</div>')
+            self.assertIn('data-search="ko the coca-cola company"', page)
+
+            pages = sorted(f.name for f in (port / "stocks").glob("*.html"))
+            self.assertEqual(pages, ["KO.html", "NODATA.html", "NVDA.html", "SOFI.html"])   # GONE.html removed
+            nvda = (port / "stocks" / "NVDA.html").read_text(encoding="utf-8")
+            self.assertIn('href="../style.css"', nvda)
+            self.assertIn('<a class="home" href="../index.html">Guy Biran</a>', nvda)
+            self.assertIn('href="../reports.html" aria-current="page"', nvda)
+            self.assertIn('href="https://github.com/Guybiran8"', nvda)               # outside links untouched
+            self.assertIn('<div class="wrap">Guy Biran</div>', nvda)
+            self.assertIn("<title>NVDA · Guy Biran</title>", nvda)
+            self.assertIn("Chart today (updated daily)", nvda)
+            self.assertIn("window.CHART = ", nvda)
             latest = nvda[nvda.index("Latest AI report"):nvda.index("Older reports")]
-            self.assertIn("NVDA-short-2026-10-13.html", latest)
+            self.assertIn('href="../reports/NVDA-short-2026-10-13.html"', latest)
             self.assertIn("(2 days old)", latest)
-            self.assertIn('<span class="stale" hidden>', latest)    # 2 days: not out of date
+            self.assertIn('<span class="stale" hidden>', latest)
             older = nvda[nvda.index("<details"):]
             self.assertLess(older.index("2026-10-01"), older.index("2026-09-20"))   # newest first
-            self.assertIn("(14 days old)", older)
-
-            data = (port / "reports" / "charts-data.js").read_text(encoding="utf-8")
-            self.assertTrue(data.startswith("window.CHART_DATA = "))
-            charts = json.loads(data[len("window.CHART_DATA = "):].rstrip().rstrip(";"))
-            self.assertEqual(set(charts), {"NVDA", "KO"})
-            self.assertEqual(len(charts["NVDA"]["candles"]), w_page.CHART_DAYS)
+            chart = json.loads(nvda.split("window.CHART = ", 1)[1].split(";</script>", 1)[0])
+            self.assertEqual(len(chart["candles"]), w_page.CHART_DAYS)
+            sofi = (port / "stocks" / "SOFI.html").read_text(encoding="utf-8")
+            self.assertIn("No AI report yet.", sofi)
+            self.assertIn("Chart data is not available today.", (port / "stocks" / "NODATA.html").read_text(encoding="utf-8"))
 
             # Rebuilding again replaces the generated part instead of stacking it.
-            w_page.build(port, TODAY, prices={"NVDA": fake_candles("nvda"), "KO": fake_candles("KO")}, download=download)
+            w_page.build(port, TODAY, prices={t: fake_candles(t) for t in ["NVDA", "KO", "SOFI"]}, names={"SOFI": "SoFi"},
+                         download=download, fetch_names=fetch_names, watchlist=["SOFI", "NVDA", "NODATA"])
             again = (port / "reports.html").read_text(encoding="utf-8")
             self.assertEqual(again.count('id="report-search"'), 1)
             self.assertTrue(again.startswith(top) and again.endswith(bottom))
+
+    def test_status_tag(self):
+        self.assertEqual(w_page.status_tag(110, 100, 90, True), "At highs")
+        self.assertEqual(w_page.status_tag(80, 90, 100, False), "Downtrend")
+        self.assertEqual(w_page.status_tag(95, 90, 100, False), "Below 200-day")
+        self.assertEqual(w_page.status_tag(95, 100, 90, False), "Below 50-day")
+        self.assertEqual(w_page.status_tag(110, 100, 90, False), "Uptrend")
+        self.assertEqual(w_page.status_tag(110, 90, 100, False), "Mixed")
 
     def test_short_report_older_than_five_days_is_flagged(self):
         r = {"file": "X-short-2026-10-09.html", "horizon": "short", "date": date(2026, 10, 9), "name": "X"}

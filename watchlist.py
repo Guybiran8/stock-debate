@@ -64,6 +64,7 @@ from zoneinfo import ZoneInfo
 
 import yfinance as yf
 
+from data import clean_name
 from chart import (AT_HIGHS, MAX_RISK, RISK_FLOOR_ATR, atr, find_levels,
                    recent_swing_low, risk_level, sma, sma_series)
 
@@ -141,7 +142,7 @@ def _profile(ticker):
     try:
         info = yf.Ticker(ticker).info or {}
     except Exception:
-        return {"industry": None, "earnings": None, "earnings_estimate": None}
+        return {"industry": None, "earnings": None, "earnings_estimate": None, "name": None}
     now = datetime.now(timezone.utc).timestamp()
     stamps = [info.get("earningsTimestampStart"), info.get("earningsTimestamp")]
     future = [s for s in stamps if s and s > now]
@@ -150,6 +151,7 @@ def _profile(ticker):
         "industry": info.get("industry"),
         "earnings": earnings,
         "earnings_estimate": info.get("isEarningsDateEstimate") if earnings else None,
+        "name": clean_name(info.get("shortName") or info.get("longName")),
     }
 
 
@@ -421,9 +423,10 @@ def build_page(results, skipped, today, auto_html=""):
     )
 
 
-def publish_to_portfolio(page_path, report_paths, today, portfolio=PORTFOLIO_DIR, prices=None, download=None):
+def publish_to_portfolio(page_path, report_paths, today, portfolio=PORTFOLIO_DIR, prices=None, names=None,
+                         download=None, fetch_names=None):
     """Copies the watchlist page and any new full reports into the portfolio, then rebuilds
-    reports.html so every stock's chart is refreshed. Nothing is committed or pushed."""
+    reports.html and every stocks/TICKER.html page. Nothing is committed or pushed."""
     import portfolio_page
 
     portfolio = Path(portfolio)
@@ -441,10 +444,12 @@ def publish_to_portfolio(page_path, report_paths, today, portfolio=PORTFOLIO_DIR
         (dest / rp.name).write_text(rp.read_text(encoding="utf-8"), encoding="utf-8")
         copied.append(rp.name)
 
-    built = portfolio_page.build(portfolio, today, prices=prices, download=download)
-    print(f"Rebuilt reports.html: {len(built['blocks'])} stock blocks, charts for {len(built['charts'])}"
-          + (f", no chart data for {', '.join(built['no_chart'])}" if built["no_chart"] else ""))
-    return copied + ["reports.html", "charts-data.js"]
+    built = portfolio_page.build(portfolio, today, prices=prices, names=names, download=download,
+                                 fetch_names=fetch_names)
+    print(f"Rebuilt reports.html with {len(built['cards'])} cards and the stock pages"
+          + (f"; no chart data for {', '.join(built['no_chart'])}" if built["no_chart"] else "")
+          + (f"; no company name for {', '.join(built['no_name'])}" if built["no_name"] else ""))
+    return copied + ["reports.html", "stocks/"]
 
 
 def run(ran_reports=True, runner=_run_full_report):
@@ -476,7 +481,8 @@ def run(ran_reports=True, runner=_run_full_report):
                    encoding="utf-8")
     print(f"\nSaved {out}")
 
-    copied = publish_to_portfolio(out, [p for _, o, p in outcomes if p], today, prices=prices)
+    names = {t: p.get("name") for t, p in profiles.items() if p.get("name")}
+    copied = publish_to_portfolio(out, [p for _, o, p in outcomes if p], today, prices=prices, names=names)
     if copied:
         print(f"Copied to portfolio: {', '.join(copied)}")
     return results, skipped, outcomes
