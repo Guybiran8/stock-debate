@@ -186,7 +186,7 @@ def nearby_levels(year, price, s20, day_label):
 
     # Support: only nearby levels count (see risk_level).
     swing = recent_swing_low(year, price)
-    swing = (swing[0], f"most recent swing low, {day_label(year[swing[1]])}") if swing else None
+    swing = (swing[0], f"most recent swing low (a low point where the price turned back up), {day_label(year[swing[1]])}") if swing else None
     risk = risk_level(price, levels_below, swing, s20)
     if risk:
         supports = [risk] + [(p, f"support level, touched {n} times") for p, n in levels_below
@@ -196,7 +196,7 @@ def nearby_levels(year, price, s20, day_label):
         support_text = "; ".join(f"${p:,.2f} ({label})" for p, label in supports)
         distance_text = f"{gap * 100:.1f}% below price"
         if gap < floor:
-            distance_text += (f", less than one 14-day average true range, so count the risk as at least "
+            distance_text += (f", less than one 14-day average true range (the typical daily move), so count the risk as at least "
                               f"{floor * 100:.1f}%")
     else:
         supports = []
@@ -256,26 +256,32 @@ def get_chart(ticker, today):
     lines = [
         f"Latest price: ${price:,.2f} (most recent price on {last_day:%b %d}, from {source}).{stale}",
         f"Candles run through: {last_day:%b %d, %Y}",
+        f"50-day average (average closing price over the last 50 trading days): {money(s50)}",
+        f"200-day average (average closing price over the last 200 trading days): {money(s200)}",
+        f"20-day average (average closing price over the last 20 trading days): {money(s20)}",
         f"Trend: {trend}",
-        f"50-day average: {money(s50)}",
-        f"200-day average: {money(s200)}",
         f"Change over 1 day: {pct(change(1))}",
         f"Change over 1 month: {pct(change(21))}",
         f"Change over 3 months: {pct(change(63))}",
-        f"52-week high: ${high52:,.2f}",
-        f"52-week low: ${low52:,.2f}",
-        f"Nearest support below price: {support_text}",
+        f"52-week high (highest price in the last year): ${high52:,.2f}",
+        f"52-week low (lowest price in the last year): ${low52:,.2f}",
+        f"Nearest support (a price where buyers stepped in before) below price: {support_text}",
         f"Distance to nearest support: {distance_text}",
-        f"Nearest resistance above price: {resistance_text}",
+        f"Nearest resistance (a price where sellers stepped in before) above price: {resistance_text}",
         f"14-day average true range (typical daily move): ${day_range:,.2f} ({day_range / price * 100:.1f}% of price)",
-        f"RSI (14-day): {num(r)}",
-        f"Latest day's volume vs 20-day average: {last_vol / vol20:.2f}x{partial}",
+        f"RSI (14-day; a 0 to 100 gauge of how fast the price moved, above 70 is fast up, below 30 fast down): {num(r)}",
+        f"Latest day's volume (shares traded) vs its 20-day average: {last_vol / vol20:.2f}x{partial}",
     ]
     return {
         "text": "\n".join(lines),
         "daily": daily,
         "supports": supports,
         "resistances": resistances,
+        "price": price,
+        "atr": day_range,
+        "at_highs": lv["at_highs"],
+        "high52": high52,
+        "low52": low52,
     }
 
 

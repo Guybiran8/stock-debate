@@ -1,8 +1,11 @@
+import re
 import threading
 import time
 
+import wording
 from config import GROK_MODEL, JUDGE_REASONING_EFFORT, grok
-from research import HORIZONS
+from research import HORIZONS, rewrite_text
+from timing import step
 
 COMMON_INSTRUCTIONS = """
 You are a neutral judge of a stock debate. You have the full DATA and RESEARCH
@@ -17,22 +20,39 @@ The reader is considering {HORIZON}. Weigh the evidence for that time frame.
 For a short-term trade, near-term events, trader mood and chart levels matter
 most. For a long-term hold, business quality, cash and valuation matter most.
 
+Focus on what actually moves the price, and when. Each research fact says how
+and when it could move the price. Use that.
+
 HOW TO WRITE:
-- Write complete, clear sentences. Being clear matters more than being short.
+- The reader has never bought a stock. Write at about a 9th-grade level: short
+  sentences (under 18 words), common words, one idea per sentence.
 - Use the real name of every financial term. The first time a term appears,
-  explain it in a few words in brackets, for example "RSI (a 0 to 100 gauge of
-  how fast the price has moved)" or "free cash flow (cash left after spending
+  explain it in a few plain words in brackets, for example "RSI (a 0 to 100 gauge
+  of how fast the price has moved)" or "free cash flow (cash left after spending
   on equipment)". Never invent a nickname for a standard term.
-- One idea per sentence. Do not cram several facts into one sentence with commas.
+- Never work out how many dollars someone would win or lose. The report adds
+  those from code. Price levels and percent moves are fine.
 """
 
 DECISION_INSTRUCTIONS = COMMON_INSTRUCTIONS + """
 Write a brief for a regular investor who wants enough evidence to make their
-own decision. Use exactly these two headings, written exactly as shown with
+own decision. Use exactly these three headings, written exactly as shown with
 nothing added, each on its own line, with a blank line between sections:
 
+IN PLAIN ENGLISH
 WHERE THE EVIDENCE LEANS
 THE DECISION
+
+Under IN PLAIN ENGLISH, write one full paragraph of 7 to 10 short sentences, with
+no dashes or lists, for someone who has never bought a stock. Cover, in this order:
+what is going on with this company and its stock right now; what someone buying
+today is betting will happen; how they make money (what has to happen to the
+price, and why it might); how they lose money (what could go wrong); then write
+the exact token [MONEY] as its own sentence, where the report will add a dollar
+example; then the one price to watch, using a level from PRICE CHART DATA, and
+what it would mean if the price crossed it; then the next date that matters
+(see NEXT DATE THAT MATTERS) and what happens that day. Explain every term in
+plain words or avoid it. No jargon left unexplained.
 
 Under WHERE THE EVIDENCE LEANS, write exactly one line. It must start with
 "Leans bullish:" or "Leans bearish:" or "Mixed:" and then give the single
@@ -51,22 +71,22 @@ and the label shown, each one or two clear sentences:
 - Case gets weaker if: one or two concrete, checkable signals, using real numbers, price levels or dates from the data.
 Do not tell the reader to buy or sell. Lay out the decision so they can make it.
 
-Hard limit: 300 words total. Plain text, no markdown symbols.
+Hard limit: 500 words total. Plain text, no markdown symbols.
 """
 
-DETAILS_INSTRUCTIONS = COMMON_INSTRUCTIONS + """
-Write the rest of the brief for a regular investor who wants enough evidence
-to make their own decision. Use exactly these seven headings, written exactly
+# The rest of the brief is written by two judges at the same time, since a long answer is what
+# makes a judge slow. Together they cover the same seven sections, with the same rules.
+DETAILS_INTRO = """
+Write part of the brief for a regular investor who wants enough evidence
+to make their own decision. Use exactly these headings, written exactly
 as shown with nothing added, each on its own line, with a blank line between
 sections:
+"""
 
+POINTS_INSTRUCTIONS = COMMON_INSTRUCTIONS + DETAILS_INTRO + """
 BEST BULL POINTS
 BEST BEAR POINTS
 WHERE THEY DISAGREE
-WHAT THE CHART SHOWS
-DATA WARNINGS
-CLAIMS THAT FAILED
-CHECK THIS YOURSELF
 
 Under BEST BULL POINTS give the 3 best-supported points for owning the stock.
 Under BEST BEAR POINTS give the 3 best-supported points against.
@@ -79,6 +99,15 @@ Each of those lines is one or two clear sentences.
 
 Under WHERE THEY DISAGREE, give 1 or 2 questions the evidence cannot settle,
 each on its own line starting with a dash, and say what would settle each one.
+
+Hard limit: 600 words total. Plain text, no markdown symbols.
+"""
+
+CHECKS_INSTRUCTIONS = COMMON_INSTRUCTIONS + DETAILS_INTRO + """
+WHAT THE CHART SHOWS
+DATA WARNINGS
+CLAIMS THAT FAILED
+CHECK THIS YOURSELF
 
 Under WHAT THE CHART SHOWS, write for a beginner, using ONLY the numbers in the
 PRICE CHART DATA section. Never invent a price level. Give exactly 5 points,
@@ -97,7 +126,7 @@ Under CLAIMS THAT FAILED, list up to 3 claims from either side that the
 evidence contradicts or does not support, and say which side made each.
 Under CHECK THIS YOURSELF, give 2 or 3 things to check.
 
-Hard limit: 900 words total. Plain text, no markdown symbols.
+Hard limit: 400 words total. Plain text, no markdown symbols.
 """
 
 
@@ -133,17 +162,44 @@ def _stream(instructions_template, horizon, debate_text, label):
     return text
 
 
+def plain_section(brief):
+    """The IN PLAIN ENGLISH paragraph from a decision brief, or ""."""
+    m = re.search(r"IN PLAIN ENGLISH:?\s*\n(.*?)(?=\n\s*WHERE THE EVIDENCE LEANS|\Z)", brief, re.S | re.I)
+    return " ".join(m.group(1).split()) if m else ""
+
+
+def plain_problems(brief):
+    """What the IN PLAIN ENGLISH paragraph is missing."""
+    text = plain_section(brief)
+    if not text:
+        return ["The IN PLAIN ENGLISH section is missing. Add it first, as one full paragraph."]
+    out = []
+    if len(re.findall(r"[.!?](\s|$)", text)) < 6:
+        out.append("IN PLAIN ENGLISH must be a full paragraph of 7 to 10 sentences, not a short summary.")
+    if "[MONEY]" not in text:
+        out.append("IN PLAIN ENGLISH must contain the exact token [MONEY] as its own sentence, right after how you lose money.")
+    if not re.search(r"\$\d", text.replace("[MONEY]", "")):
+        out.append("IN PLAIN ENGLISH must name the one price to watch, as a dollar price level.")
+    if not re.search(r"\b(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*\.? \d{1,2}|\d{4}-\d{2}-\d{2}", text):
+        out.append("IN PLAIN ENGLISH must give the next date that matters, as a calendar date.")
+    return out
+
+
 def judge_decision(data, d, horizon):
     return _stream(DECISION_INSTRUCTIONS, horizon, _debate_text(data, d), "decision")
 
 
-def judge_details(data, d, horizon):
-    return _stream(DETAILS_INSTRUCTIONS, horizon, _debate_text(data, d), "details")
+def judge_points(data, d, horizon):
+    return _stream(POINTS_INSTRUCTIONS, horizon, _debate_text(data, d), "points")
+
+
+def judge_checks(data, d, horizon):
+    return _stream(CHECKS_INSTRUCTIONS, horizon, _debate_text(data, d), "checks")
 
 
 def judge(data, d, horizon):
-    # Runs the decision and details judges at the same time, in separate
-    # threads, so the wait is the slower of the two rather than both added up.
+    # Runs the decision judge and the two details judges at the same time, in separate
+    # threads, so the wait is the slowest of them rather than all added up.
     out = {}
 
     errors = []
@@ -151,14 +207,19 @@ def judge(data, d, horizon):
     def run(name, fn):
         start = time.perf_counter()
         try:
-            out[name] = fn(data, d, horizon)
+            # The wording check runs here too, so each judge's rewrite also happens in parallel.
+            with step(f"{name} judge"):
+                text = fn(data, d, horizon)
+            out[name], _ = wording.fix(text, rewrite_text, f"{name} judge",
+                                       extra_check=plain_problems if name == "decision" else None)
         except Exception as e:
             errors.append(e)
         out[f"{name}_seconds"] = time.perf_counter() - start
 
     threads = [
         threading.Thread(target=run, args=("decision", judge_decision)),
-        threading.Thread(target=run, args=("details", judge_details)),
+        threading.Thread(target=run, args=("points", judge_points)),
+        threading.Thread(target=run, args=("checks", judge_checks)),
     ]
     for t in threads:
         t.start()
@@ -169,4 +230,5 @@ def judge(data, d, horizon):
     if errors:
         raise errors[0]
 
-    return out["decision"], out["details"], out["decision_seconds"], out["details_seconds"]
+    details = out["points"] + "\n\n" + out["checks"]
+    return out["decision"], details, out["decision_seconds"], max(out["points_seconds"], out["checks_seconds"])

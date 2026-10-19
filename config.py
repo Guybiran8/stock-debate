@@ -29,10 +29,15 @@ POLY_KEY = _require("POLYGON_API_KEY")
 CLAUDE_MODEL = "claude-sonnet-5-5"
 OPENAI_MODEL = "gpt-6-luna"
 GROK_MODEL = "grok-4.7"
+# Fast model for wording rewrites (wording.py). They only change wording, never facts.
+# Timed on a real 240-word rewrite: gpt-5.4-mini 2s, gpt-6-luna 10s, gpt-6-astra 19s.
+REWRITE_MODEL = "gpt-5.4-mini"
 
-# How hard Grok thinks before judging: "low", "medium", "high" (xAI's default) or "xhigh".
-# Lower is much faster. Only the two judge calls use this.
+# How hard Grok thinks: "low", "medium", "high" (xAI's default) or "xhigh". Lower is much faster.
+# The two judge calls use JUDGE_REASONING_EFFORT; the research search and the fact checks use
+# RESEARCH_REASONING_EFFORT.
 JUDGE_REASONING_EFFORT = "low"
+RESEARCH_REASONING_EFFORT = "medium"
 
 # Keeps research from earlier runs so the same stock is not researched twice in one day.
 CACHE_FILE = Path(__file__).parent / "research_cache.json"
