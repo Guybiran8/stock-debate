@@ -5,3 +5,5 @@ research_cache.json
 report.html
 .claude/
 reports/
+.env.txt
+*.save
