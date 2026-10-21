@@ -16,6 +16,15 @@ def _gain(x):
     return f"+{_d(x)}" if x >= 0 else f"-{_d(-x)}"
 
 
+def _support_label(kind):
+    # The nearest level can be a tested support, a swing low or the 20-day average (chart.risk_level).
+    if kind == "20-day average":
+        return "the 20-day average, the average closing price over the last 20 trading days"
+    if kind.startswith("most recent swing low"):
+        return "the most recent swing low, a low point where the price turned back up"
+    return "the nearest support, a price where buyers stepped in before"
+
+
 def target_and_stop(chart):
     """(up price, up label, down price, down label) for the main example."""
     price = chart["price"]
@@ -31,11 +40,11 @@ def target_and_stop(chart):
     if chart["supports"] and chart["supports"][0][0] > floor:
         # Same rule as the watchlist: never count the risk as less than one normal day's move.
         down = floor
-        down_label = (f"one normal day's move down; the nearest support, a price where buyers stepped in before, "
+        down_label = (f"one normal day's move down; {_support_label(chart['supports'][0][1])}, "
                       f"is at {_d(chart['supports'][0][0])}, closer than that")
     elif chart["supports"]:
         down = chart["supports"][0][0]
-        down_label = "the nearest support, a price where buyers stepped in before"
+        down_label = _support_label(chart["supports"][0][1])
     else:
         down = price * (1 - MAX_RISK)
         down_label = (f"a {MAX_RISK * 100:.0f}% drop, because there is no support (a price where buyers stepped in "

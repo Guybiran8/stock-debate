@@ -100,7 +100,9 @@ def _source_html(f):
     url = re.match(r"https?://\S+", src)
     shown = (f"<a href='{html.escape(src, quote=True)}' target='_blank' rel='noopener'>"
              f"{html.escape(re.sub(r'^https?://(www\\.)?', '', src)[:60])}</a>") if url else html.escape(src)
-    bits = [shown] + ([html.escape(f["date"])] if f.get("date") else []) + ([html.escape(f["check"])] if f.get("check") else [])
+    if "pulled" in f:   # a code-pulled fact: its date can be an upcoming event, so show when it was pulled
+        return shown + (f" · pulled {f['pulled']:%b %d, %Y}" if f["pulled"] else "")
+    bits =[shown] + ([html.escape(f["date"])] if f.get("date") else []) + ([html.escape(f["check"])] if f.get("check") else [])
     return " · ".join(bits)
 
 

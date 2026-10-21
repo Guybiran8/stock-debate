@@ -112,6 +112,15 @@ _AFTER = re.compile(r"^((\s+[\w'/-]+){0,2}\s*[\(\[]|\s*[—–]\s|:\s+[A-Za-z]|\
                     r"|\s+(means|meaning|is a|is an|is the|is when|is how|is where|are the|are when|refers to|measures)\b)", re.I)
 _BEFORE = re.compile(r"((called|known as|named|termed)\s+(an?\s+|the\s+)?[\"'“]?|\((its |the |a |an |this is )?)$", re.I)
 
+# A rewrite sometimes tacks "priced in [already reflected in the stock price]" onto the end of a
+# line, after the sentence is over, instead of explaining the term where it is used.
+_DANGLING = re.compile(r"(?<=[.!?])[ \t]+([A-Za-z][\w'/ -]{0,40}?)[ \t]*[\[(][^\]()\n]{3,200}[\])][ \t]*(?=\n|$)")
+
+
+def drop_dangling_terms(text):
+    """Removes a glossary term and its explanation left on its own after the end of a sentence."""
+    return _DANGLING.sub(lambda m: "" if _TERM_RE.fullmatch(m.group(1).strip()) else m.group(0), text)
+
 # A sentence that works out dollars won or lost on a position, like "+$120 on 10 shares" or
 # "you would lose about $300". Company-sized numbers ($2.4B) and per-share prices do not count.
 _BIG = r"(?![\d,.]*\s?(B|M|T|billion|million|trillion)\b)"
@@ -188,6 +197,8 @@ Fix exactly these problems:
 
 Keep every fact, number, date, price level, URL, heading and label exactly as it is.
 Keep the same layout: the same headings, the same lines starting with a dash, the same labels.
+Put each explanation right after the word it explains, inside its sentence. Never add a term and
+its explanation on their own after a sentence ends.
 Keep the token [MONEY] exactly as written and in the same place, if the text has it. Keep every
 required part of each section: shorten sentences, but do not cut what they cover.
 Do not add new facts. Do not remove facts except a sentence about dollars won or lost.
@@ -217,7 +228,7 @@ def fix(text, rewrite, label, extra_check=None, view=None):
     except Exception as e:
         print(f"    rewrite of {label} failed ({type(e).__name__}), keeping the first version")
         return text, found
-    new = (new or "").strip()
+    new = drop_dangling_terms((new or "").strip())
     if not new:
         return text, found
     left = check(new)

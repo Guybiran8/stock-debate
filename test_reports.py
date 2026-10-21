@@ -84,6 +84,20 @@ class Wording(unittest.TestCase):
         self.assertTrue(text.startswith("RSI (a 0"))
         self.assertEqual(left, [])
 
+    def test_rewrite_drops_terms_left_after_the_sentence(self):
+        # Both from the PENG report of Oct 20, 2026.
+        bad = ("- The report can still weigh on the stock for about three trading days after Oct 20. "
+               "priced in [already reflected in the stock price]\n"
+               "- The Fed rate decision on Oct 28, and the inflation report on Oct 29. "
+               "interest rates [the cost of borrowing money set by the Fed]\n"
+               "- Results come Nov 3. Super Micro (SMCI)")
+        text, _ = wording.fix("RSI is 72.", lambda p: bad, "test")
+        self.assertIn("three trading days after Oct 20.\n", text)
+        self.assertIn("inflation report on Oct 29.\n", text)
+        self.assertNotIn("[already reflected", text)
+        self.assertNotIn("[the cost of borrowing", text)
+        self.assertIn("Super Micro (SMCI)", text)   # not a glossary term, so it stays
+
     def test_fix_does_not_call_rewrite_for_good_text(self):
         text, left = wording.fix("The stock went up today.", lambda p: self.fail("no rewrite expected"), "test")
         self.assertEqual(left, [])
@@ -116,6 +130,17 @@ class Scenarios(unittest.TestCase):
         s = scenarios.main_sentence(c)
         self.assertIn(f"-${c['atr'] * 10:,.2f} if it falls to ${c['price'] - c['atr']:,.2f}", s)
         self.assertIn("one normal day's move down", s)
+
+    def test_20_day_average_and_swing_low_are_not_called_support(self):
+        c = fake_chart()
+        c["supports"] = [(c["price"] * 0.9, "20-day average")]
+        s = scenarios.main_sentence(c)
+        self.assertIn("(the 20-day average, the average closing price over the last 20 trading days)", s)
+        self.assertNotIn("buyers stepped in", s)
+        c["supports"] = [(c["price"] - 0.5, "most recent swing low (a low point where the price turned back up), Oct 02")]
+        s = scenarios.main_sentence(c)
+        self.assertIn("one normal day's move down; the most recent swing low, a low point where the price turned "
+                      f"back up, is at ${c['price'] - 0.5:,.2f}, closer than that", s)
 
     def test_long_lines_add_target_and_low(self):
         lines = scenarios.money_lines(fake_chart(), "long", target=150.0, earnings=(0.05, 4, TODAY))
@@ -179,6 +204,43 @@ class HardFacts(unittest.TestCase):
         f = hard_facts.analyst_fact(FakeStock(), TODAY, 130.0)
         self.assertIn("downgraded it (lowered its rating) from Neutral to Sell", f["fact"])
         self.assertIn("every new target is below today's price", f["effect"])
+
+    def _analyst(self, rows, price):
+        s = FakeStock()
+        s.upgrades_downgrades = pd.DataFrame(
+            rows, columns=["Firm", "ToGrade", "FromGrade", "Action", "priceTargetAction", "currentPriceTarget",
+                           "priorPriceTarget"],
+            index=pd.DatetimeIndex([pd.Timestamp("2026-10-10") - timedelta(days=i) for i in range(len(rows))]))
+        return hard_facts.analyst_fact(s, TODAY, price)
+
+    def test_analyst_notes_are_counted_once(self):
+        # Like MRNA: a downgrade that also raised its target, plus two target raises, all below the price.
+        f = self._analyst([["Citi", "Sell", "Neutral", "down", "Raises", 80.0, 60.0],
+                           ["Goldman", "Neutral", "Neutral", "main", "Raises", 137.0, 120.0],
+                           ["Morgan", "Equal-Weight", "Equal-Weight", "main", "Raises", 95.0, 89.0]], 242.0)
+        self.assertIn("published 3 note(s): 0 upgrade(s), 1 downgrade(s), 0 started covering it and "
+                      "2 kept their rating", f["fact"])
+        self.assertIn("3 raised and 0 cut", f["fact"])
+        self.assertIn("lean negative", f["effect"])
+        # Target raises alone, with every target below the price, are not positive.
+        f = self._analyst([["Goldman", "Neutral", "Neutral", "main", "Raises", 137.0, 120.0]], 242.0)
+        self.assertIn("are mixed", f["effect"])
+
+    def test_reaffirmed_ratings_are_not_changes(self):
+        # Like NVDA: two notes that kept the rating and the target.
+        f = self._analyst([["Cantor", "Overweight", "Overweight", "main", "Maintains", 350.0, 350.0],
+                           ["Rosenblatt", "Buy", "Buy", "reit", "Maintains", 390.0, 390.0]], 216.0)
+        self.assertIn("2 kept their rating", f["fact"])
+        self.assertIn("None of them changed a rating or a price target.", f["fact"])
+        self.assertIn("only repeat earlier views", f["effect"])
+        self.assertNotIn("mixed", f["effect"])
+
+    def test_code_facts_show_source_once_with_pull_date(self):
+        f = hard_facts.earnings_fact(FakeStock(), {}, fake_daily(), TODAY)[0]
+        f["pulled"] = TODAY
+        self.assertEqual(report._source_html(f), "Yahoo Finance · pulled Oct 16, 2026")
+        research_fact = {"source": "https://example.com/a", "date": "2026-10-01", "check": "re-checked against its source: confirmed"}
+        self.assertIn("2026-10-01 · re-checked", report._source_html(research_fact))
 
     def test_insider_sales_only_count_open_market_sales(self):
         f = hard_facts.insider_fact(FakeStock(), TODAY)

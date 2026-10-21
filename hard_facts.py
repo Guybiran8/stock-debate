@@ -21,7 +21,7 @@ from data import money
 ANALYST_DAYS = 30
 INSIDER_DAYS = 90
 NY = ZoneInfo("America/New_York")
-YAHOO = "Yahoo Finance data, pulled by code"
+YAHOO = "Yahoo Finance"
 
 SECTOR_FUNDS = {
     "Technology": "XLK", "Healthcare": "XLV", "Financial Services": "XLF", "Consumer Cyclical": "XLY",
@@ -32,8 +32,9 @@ INDUSTRY_FUNDS = {"biotechnology": "XBI", "semiconductor": "SMH"}
 
 
 def _fact(topic, fact, effect, when, day=None):
+    # date is what the fact is about (it can be an upcoming event), so the report shows the pull date instead.
     return {"topic": topic, "fact": fact, "date": str(day) if day else "", "source": YAHOO,
-            "effect": effect, "when": when, "check": "pulled from data by code"}
+            "effect": effect, "when": when, "pulled": None}
 
 
 def _pct(x):
@@ -149,22 +150,33 @@ def analyst_fact(stock, today, price):
     lines = [f"{ts:%b %d}: {_grade_sentence(r)}." for ts, r in recent.iterrows()]
     ups = int((recent["Action"] == "up").sum())
     downs = int((recent["Action"] == "down").sum())
+    inits = int((recent["Action"] == "init").sum())
+    kept = len(recent) - ups - downs - inits
     raises = int((recent["priceTargetAction"] == "Raises").sum())
     lowers = int((recent["priceTargetAction"] == "Lowers").sum())
     targets = [t for t in recent["currentPriceTarget"] if t]
-    lean = ups + raises - downs - lowers
-    summary = (f"In the last {ANALYST_DAYS} days analysts (people at banks who rate the stock) made {len(recent)} changes: "
-               f"{ups} upgrade(s), {downs} downgrade(s), {raises} price target (where an analyst thinks the price "
-               f"will be in a year) raise(s) and {lowers} cut(s).")
+    # One note can both change a rating and move a target, so notes are counted once and the
+    # actions separately. A rating change says more than a target move, so it decides the lean.
+    changed = ups or downs or inits or raises or lowers
+    summary = (f"In the last {ANALYST_DAYS} days analysts (people at banks who rate the stock) published "
+               f"{len(recent)} note(s): {ups} upgrade(s), {downs} downgrade(s), {inits} started covering it and "
+               f"{kept} kept their rating. Price targets (where an analyst thinks the price will be in a year): "
+               f"{raises} raised and {lowers} cut.")
+    if not changed:
+        summary += " None of them changed a rating or a price target."
     below = 0
     if targets and price:
         avg = sum(targets) / len(targets)
         below = sum(t < price for t in targets)
         summary += f" The average of these new targets is ${avg:,.0f}, {(avg / price - 1) * 100:+.0f}% from today's price."
+    lean = (ups - downs) or (raises - lowers)
+    if lean > 0 and targets and below == len(targets):
+        lean = 0   # raised targets that all sit below the price are not a positive sign
     effect = ("Upgrades and higher targets can lift the price as other investors follow them. "
               "Downgrades and lower targets can push it down. "
-              + ("By count these changes lean positive." if lean > 0 else "By count these changes lean negative."
-                 if lean < 0 else "By count these changes are mixed."))
+              + ("These notes only repeat earlier views, so they add little new." if not changed
+                 else "Overall these notes lean positive." if lean > 0 else "Overall these notes lean negative."
+                 if lean < 0 else "Overall these notes are mixed."))
     if targets and below == len(targets):
         effect += (" But every new target is below today's price, so these analysts think the stock has already "
                    "risen past what they think it is worth. That can cap rises.")
@@ -361,6 +373,8 @@ def get_hard_facts(ticker, daily, today, plan, catalyst=None):
     else:
         facts += cash_facts(stock, info)
     earnings = (sum(abs(m) for _, m in moves) / len(moves), len(moves), earn_day) if moves else None
+    for f in facts:
+        f["pulled"] = today
     return {"facts": facts, "next_date": next_day, "text": facts_text(facts), "earnings": earnings,
             "target": info.get("targetMeanPrice")}
 
