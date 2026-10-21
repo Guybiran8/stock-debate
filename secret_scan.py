@@ -8,7 +8,8 @@ import subprocess
 from pathlib import Path
 
 PATTERNS = {
-    "sk- style key": r"sk-[A-Za-z0-9_\-]{16,}",
+    # Not inside a word ("risk-isnt-...") and with a 16+ character run, which keys have and URL slugs do not.
+    "sk- style key": r"(?<![A-Za-z0-9_\-])sk-[A-Za-z0-9_\-]*[A-Za-z0-9_]{16}[A-Za-z0-9_\-]*",
     "xai- key": r"xai-[A-Za-z0-9_\-]{16,}",
     "GitHub token": r"gh[pousr]_[A-Za-z0-9]{20,}",
     "Google API key": r"AIza[0-9A-Za-z_\-]{30,}",

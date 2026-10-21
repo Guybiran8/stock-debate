@@ -346,6 +346,17 @@ class WatchlistTest(unittest.TestCase):
                 self.assertEqual(staged, "")                                    # and nothing left staged
         self.assertEqual(pushed, [])
 
+    def test_sk_pattern_skips_words_but_catches_keys(self):
+        import secret_scan
+        prefix = "s" + "k-"                          # built here so this file never matches itself
+        for clean in ("https://www.benzinga.com/26/10/62464767/pltr-stocks-biggest-ri" + prefix
+                      + "isnt-slowing-growth-but-its-price-analyst-warns",
+                      "news/" + prefix + "hynix-reports-record-quarterly-profit-on-ai-memory-demand"):
+            self.assertEqual(secret_scan.scan_text(clean, {}), [])
+        for key in (prefix + "x" * 24, prefix + "proj-" + "Ab3dE6gH9jK2mN5pQ8sT1vW4yZ7" * 3,
+                    prefix + "ant-api03-" + "Zq7Yp6Xo5Wn4Vm3Ul2Tk1Sj0" * 4, f'OPENAI_KEY="{prefix}{"a1B2" * 12}"'):
+            self.assertEqual(secret_scan.scan_text(key, {}), ["sk- style key pattern x1"])
+
     def test_push_commits_and_pushes_when_clean(self):
         pushed = []
 
