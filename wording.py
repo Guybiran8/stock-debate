@@ -237,15 +237,6 @@ def fix(text, rewrite, label, extra_check=None, view=None):
     return new, left
 
 
-TIP_CSS = """<style>
-.tip { border-bottom: 1px dotted currentColor; cursor: help; position: relative; }
-.tip:hover::after, .tip:focus::after {
-  content: attr(data-tip); position: absolute; left: 0; top: 1.5em; z-index: 10; width: max-content;
-  max-width: 280px; padding: 6px 9px; border-radius: 6px; background: #222; color: #fff;
-  font: 400 13px/1.4 sans-serif; white-space: normal; box-shadow: 0 2px 8px #0005; }
-</style>"""
-
-
 def tip_html(text, seen=None):
     """HTML-escapes text and wraps the first use of each term in a hover tooltip.
     Pass the same seen set across blocks to tooltip a term only once in that run."""

@@ -1,4 +1,3 @@
-import html
 import webbrowser
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
@@ -14,7 +13,7 @@ from data import HOW_TO_READ, get_facts
 from debate import run_debate
 from hard_facts import get_hard_facts
 from judge import judge
-from report import build_page
+from report import build_page, page_html
 from research import PLANS, facts_text, research
 from scenarios import main_sentence, money_lines
 from timing import step
@@ -106,12 +105,7 @@ def analyze(ticker, horizon, open_browser=True, fresh_research=False):
     page = build_page(ticker, name, today, label, facts, chart_text, chart, found, d, decision_brief, details_brief,
                       money_sentence, lines, hard["facts"], PLANS[plan]["topics"], research_text)
 
-    full_html = (
-        "<!DOCTYPE html><html><head><meta charset='utf-8'>"
-        f"<title>{html.escape(str(name))} ({html.escape(ticker)})</title></head><body>"
-        + page
-        + "</body></html>"
-    )
+    full_html = page_html(ticker, name, page)
     REPORT_FILE.write_text(full_html, encoding="utf-8")
 
     # Also keep a copy of every run, so older reports are not lost.

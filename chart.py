@@ -312,22 +312,23 @@ def chart_html(ticker, chart):
     box = f"chart_{ticker}_{len(daily)}"
 
     return f"""
-    <div style='max-width:760px;font-family:sans-serif;margin-top:14px'>
-      <div style='font-weight:700;margin-bottom:4px'>{html.escape(ticker)} daily candles, last 12 months</div>
-      <div style='font-size:12px;opacity:.7;margin-bottom:6px'>
+    <div class='block chart'>
+      <div class='label'>{html.escape(ticker)} daily candles, last 12 months</div>
+      <div class='note'>
         Blue = 50-day average. Orange = 200-day average. Dashed green = support. Dashed red = resistance.
         Scroll to zoom, drag to move.
       </div>
-      <div id='{box}' style='width:100%;height:420px;background:#ffffff'></div>
+      <div id='{box}' class='chart-box'></div>
     </div>
     <script>
     (function() {{
       function draw() {{
         var el = document.getElementById('{box}');
+        var css = function (name, fallback) {{ return getComputedStyle(el).getPropertyValue(name).trim() || fallback; }};
         var chart = LightweightCharts.createChart(el, {{
           width: el.clientWidth || 740, height: 420,
-          layout: {{ background: {{ color: '#ffffff' }}, textColor: '#222222' }},
-          grid: {{ vertLines: {{ color: '#eeeeee' }}, horzLines: {{ color: '#eeeeee' }} }},
+          layout: {{ background: {{ color: css('--surface', '#ffffff') }}, textColor: css('--muted', '#222222'), fontFamily: css('--sans', 'sans-serif') }},
+          grid: {{ vertLines: {{ color: css('--border', '#eeeeee') }}, horzLines: {{ color: css('--border', '#eeeeee') }} }},
           rightPriceScale: {{ borderVisible: false }},
           timeScale: {{ borderVisible: false }}
         }});
@@ -339,7 +340,7 @@ def chart_html(ticker, chart):
         var vol = chart.addHistogramSeries({{ priceFormat: {{ type: 'volume' }}, priceScaleId: '' }});
         vol.priceScale().applyOptions({{ scaleMargins: {{ top: 0.82, bottom: 0 }} }});
         vol.setData({json.dumps(volumes)});
-        var a = chart.addLineSeries({{ color: '#2962ff', lineWidth: 1, priceLineVisible: false, lastValueVisible: false }});
+        var a = chart.addLineSeries({{ color: css('--ma50', '#2962ff'), lineWidth: 1, priceLineVisible: false, lastValueVisible: false }});
         a.setData({json.dumps(line50)});
         var b = chart.addLineSeries({{ color: '#f59f00', lineWidth: 1, priceLineVisible: false, lastValueVisible: false }});
         b.setData({json.dumps(line200)});

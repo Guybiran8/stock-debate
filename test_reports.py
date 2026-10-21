@@ -357,6 +357,17 @@ class Report(unittest.TestCase):
         self.assertIn("How it could move the price:", out)
         self.assertIn("href='https://example.com/a'", out)
 
+    def test_sections_use_report_css_classes(self):
+        details = "BEST BULL POINTS\n- Sales grow.\nEvidence: up 10%.\nBEST BEAR POINTS\n- Debt is high.\n"
+        html = report.brief_to_html(DECISION, details, "If you buy 10 shares at $210.", ["line one"], "")
+        self.assertNotIn("style=", html)
+        self.assertIn("<summary class='bull'>BEST BULL POINTS</summary><div class='fold-body'>", html)
+        self.assertIn("<span class='lead'>Sales grow.</span>", html)
+        self.assertIn("<summary class='bear'>BEST BEAR POINTS</summary><div class='fold-body'>", html)
+        page = report.page_html("ABC", "Abc Inc", html)
+        self.assertIn("href='report.css'", page)
+        self.assertIn(">Guy Biran</a>", page)
+
 
 if __name__ == "__main__":
     unittest.main()
