@@ -74,8 +74,10 @@ PLANS = {
   and what management said in the latest earnings report and forecast.
 - Competition: its position against its main rivals, market share, and any rival gaining on it.
 - Cash and spending: cash, debt, free cash flow as the company reports it, and big spending plans.
-- Valuation: how expensive the stock is compared with its own history and its peers, and what growth
-  today's price assumes, using numbers from named sources.
+- Valuation: code already lists trailing and forward P/E for the stock and its main peers. Do not look
+  up any price multiple (P/E, PEG, price-to-sales, EV-to-sales or similar) for the stock or its peers.
+  Add only what growth today's price assumes, as the company forecasts it or a named analyst firm
+  states it, with the date.
 - Risks: legal, political and regulatory issues and the main business risks. For any large legal, tax or
   regulatory risk, also give the amount already paid, deposited or reserved, the company's stated view,
   and the case status.
@@ -95,7 +97,18 @@ IMPORTANCE: 1 to 5, where 5 means most likely to move the price.
 
 Rules:
 - Facts only, with no opinion on whether to buy or sell.
-- Prefer the company's own filings and press releases for numbers.
+- Sources, best first. Cite the best one that has the fact:
+  Tier 1: the company's own SEC filings (sec.gov), its investor relations site and press releases, and
+  government agencies, regulators and courts (for example the Federal Reserve, BLS, BEA, FDA, FTC).
+  Tier 2: major news organizations: Reuters, Bloomberg, The Wall Street Journal, Financial Times, AP,
+  CNBC, and the main trade press for the industry.
+  Aggregators: stock data and valuation sites, investor blogs, and analyst rating news sites. Use one only
+  when no Tier 1 or Tier 2 source has the fact, and name the site in the FACT.
+  Never cite a copy of a filing or press release on another site. Link the original on sec.gov or the
+  company's own site.
+- Dates of economic reports and central bank meetings come only from the agency that publishes them:
+  the Federal Reserve (federalreserve.gov), BLS (bls.gov), BEA (bea.gov) or the Census Bureau
+  (census.gov). Never from economic calendar websites.
 - If you cannot say how a fact could move the price AND when, leave the fact out.
 - There is no limit on the number of facts. Include every fact that passes, good news and bad news.
 - Skip anything you cannot source.
@@ -347,12 +360,13 @@ def _fact_prose(text):
 CODE_COVERS = ("These are pulled from data by code, so do not research them: the next earnings date and "
                "analyst estimates for it, past earnings-day moves, the list of analyst rating and price target "
                "changes, insider trades, short interest, the 5-day sector move, cash on hand, cash burn and "
-               "share count change. You may still give context code cannot, like a reason or a company statement.")
+               "share count change, and price multiples like P/E, forward P/E, PEG and price-to-sales for the "
+               "stock and its peers. You may still give context code cannot, like a reason or a company statement.")
 
 
 def research(ticker, name, today, horizon, plan, catalyst=None, fresh=False):
     """Returns {"facts": [...], "x": text or "", "plan": plan}. fresh=True skips today's saved research."""
-    cache_key = "|".join((ticker, str(today), horizon, plan, "v2"))
+    cache_key = "|".join((ticker, str(today), horizon, plan, "v3"))
     if cache_key in RESEARCH_CACHE and not fresh:
         print("    (using research saved from earlier today, no Grok search cost)")
         out = RESEARCH_CACHE[cache_key]

@@ -7,16 +7,19 @@ Each fact says how it could move the price and when, in plain words written from
 - short interest and how it changed from the month before
 - the last 5 trading days: the stock vs its sector fund vs the S&P 500
 - cash runway and share count growth (catalyst and long-term plans)
+- trailing and forward P/E for the stock and its main peers, from one price pull on one basis
 Anything Yahoo does not have is left out, never guessed.
 """
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
+from statistics import median
 from zoneinfo import ZoneInfo
 
 import pandas as pd
 import yfinance as yf
 
 from chart import candle_date
-from data import money
+from data import clean_name, money
 
 ANALYST_DAYS = 30
 INSIDER_DAYS = 90
@@ -29,6 +32,15 @@ SECTOR_FUNDS = {
     "Real Estate": "XLRE", "Basic Materials": "XLB", "Consumer Defensive": "XLP",
 }
 INDUSTRY_FUNDS = {"biotechnology": "XBI", "semiconductor": "SMH"}
+
+PEER_COUNT = 4
+# Yahoo's industry group misses some companies' real rivals; these replace it.
+PEERS = {"PENG": ["SMCI", "DELL", "HPE"]}
+# A forecast more than this many times last year's profit per share is usually a Yahoo data error
+# (for example one not adjusted for a stock split), so that forward P/E is left out.
+MAX_EPS_JUMP = 4
+LOSS = "n/a (a loss)"
+BAD_FORECAST = "n/a (Yahoo's forecast looks wrong)"
 
 
 def _fact(topic, fact, effect, when, day=None):
@@ -280,6 +292,97 @@ def sector_fact(ticker, sector, industry):
                  closes.index[-1].date())
 
 
+def peers(ticker, info, count=PEER_COUNT):
+    """The main peers: PEERS if listed, else the biggest companies in Yahoo's industry group."""
+    if ticker in PEERS:
+        return PEERS[ticker]
+    try:
+        top = yf.Industry(info["industryKey"]).top_companies
+    except Exception:
+        return []
+    return [t for t in top.index if t != ticker][:count]
+
+
+def _pe(price, eps):
+    # A P/E on a loss is meaningless, so it is left out.
+    return price / eps if eps and eps > 0 else LOSS
+
+
+def pe_rows(tickers, prices, infos):
+    """[(ticker, name, trailing P/E, forward P/E), ...]. Every P/E is that ticker's price from the same
+    pull divided by Yahoo's earnings per share, so all of them share one basis and one moment.
+    A P/E that cannot be used is a string saying why."""
+    rows = []
+    for t in tickers:
+        info = infos.get(t) or {}
+        price = prices.get(t)
+        if not price:
+            continue
+        trail_eps, fwd_eps = info.get("trailingEps"), info.get("forwardEps")
+        fwd = (BAD_FORECAST if trail_eps and trail_eps > 0 and fwd_eps and fwd_eps > MAX_EPS_JUMP * trail_eps
+               else _pe(price, fwd_eps))
+        rows.append((t, clean_name(info.get("longName") or info.get("shortName")) or t, _pe(price, trail_eps), fwd))
+    return rows
+
+
+def _num(pe):
+    return pe if isinstance(pe, float) else None
+
+
+def _x(pe):
+    return f"{pe:.1f}" if _num(pe) else pe
+
+
+def valuation_fact(rows, day, next_day=None):
+    """Formats pe_rows (the stock first) as one fact, or None without a stock P/E or peers to compare with."""
+    if len(rows) < 2 or not (_num(rows[0][2]) or _num(rows[0][3])):
+        return None
+    (t, name, trail, fwd), others = rows[0], rows[1:]
+    fact = (f"Trailing P/E (share price divided by the last 12 months of reported profit per share) and forward "
+            f"P/E (share price divided by the profit per share analysts expect over the next 12 months), all from "
+            f"one Yahoo Finance price pull on {day:%b %d, %Y}: {name} ({t}) {_x(trail)} trailing, {_x(fwd)} forward. "
+            "Main peers: " + "; ".join(f"{n} ({pt}) {_x(tr)} and {_x(fw)}" for pt, n, tr, fw in others) + ".")
+    # Forward P/E is the cleaner comparison: one-time charges and gains distort reported profit.
+    col, label = (3, "forward") if _num(fwd) and any(_num(r[3]) for r in others) else (2, "trailing")
+    vals = [r[col] for r in others if _num(r[col])]
+    if not _num(rows[0][col]) or not vals:
+        return None
+    mid = median(vals)
+    gap = rows[0][col] / mid - 1
+    fact += (f" On {label} P/E it is {abs(gap) * 100:.0f}% {'above' if gap > 0 else 'below'} the peer median "
+             f"(the middle value) of {mid:.1f}.")
+    if label == "forward":
+        fact += " Forward is the fairer comparison, because one-time charges and gains distort reported profit."
+    if gap > 0.15:
+        effect = ("Buyers pay more for each dollar of expected profit than for its peers. That premium holds only while "
+                  "results keep up; a slowdown or a miss can shrink it and pull the price down.")
+    elif gap < -0.15:
+        effect = ("Buyers pay less for each dollar of expected profit than for its peers. Good results can close part "
+                  "of that gap and lift the price; if the discount reflects real problems, it can stay cheap.")
+    else:
+        effect = "It is priced about in line with its peers, so its own results and the group's mood drive the price."
+    when = "Mostly at earnings reports (the results a company puts out every 3 months), when profit forecasts change."
+    if next_day:
+        when += f" The next one is {next_day:%b %d, %Y}."
+    return _fact("Valuation", fact, effect, when, day)
+
+
+def fetch_valuation(ticker, info, next_day=None):
+    """Pulls prices for the stock and its peers in one download, then builds valuation_fact."""
+    names = [ticker] + peers(ticker, info)
+    if len(names) < 2:
+        return None
+    try:
+        closes = yf.download(names, period="5d", auto_adjust=False, progress=False)["Close"].ffill().iloc[-1]
+        with ThreadPoolExecutor(len(names) - 1) as pool:
+            infos = dict(zip(names[1:], pool.map(lambda t: yf.Ticker(t).info or {}, names[1:])))
+    except Exception:
+        return None
+    infos[ticker] = info
+    prices = {t: float(closes[t]) for t in names if t in closes and closes[t] == closes[t]}
+    return valuation_fact(pe_rows(names, prices, infos), closes.name.date(), next_day)
+
+
 def cash_facts(stock, info):
     """Cash runway and share count growth. Returns a list of facts."""
     out = []
@@ -372,6 +475,9 @@ def get_hard_facts(ticker, daily, today, plan, catalyst=None):
             facts.append(s)
     else:
         facts += cash_facts(stock, info)
+    v = fetch_valuation(ticker, info, next_day[0] if next_day else None)
+    if v:
+        facts.append(v)
     earnings = (sum(abs(m) for _, m in moves) / len(moves), len(moves), earn_day) if moves else None
     for f in facts:
         f["pulled"] = today

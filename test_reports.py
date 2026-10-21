@@ -4,6 +4,7 @@ so it needs no network and spends nothing."""
 import os
 import unittest
 from datetime import date, datetime, timedelta, timezone
+from unittest import mock
 
 import pandas as pd
 
@@ -188,11 +189,12 @@ class HardFacts(unittest.TestCase):
         out = [hard_facts.analyst_fact(s, TODAY, 130.0), hard_facts.insider_fact(s, TODAY),
                hard_facts.short_fact(INFO, TODAY + timedelta(days=8))] + hard_facts.cash_facts(s, INFO)
         out.append(hard_facts.earnings_fact(s, {}, daily, TODAY)[0])
+        out.append(hard_facts.valuation_fact(hard_facts.pe_rows(*PE_DATA), TODAY, TODAY + timedelta(days=8)))
         return [f for f in out if f]
 
     def test_every_fact_says_how_and_when(self):
         facts = self.facts()
-        self.assertEqual(len(facts), 6)
+        self.assertEqual(len(facts), 7)
         for f in facts:
             self.assertTrue(f["effect"] and f["when"], f["topic"])
 
@@ -255,6 +257,50 @@ class HardFacts(unittest.TestCase):
     def test_high_short_interest_mentions_squeeze(self):
         self.assertIn("short squeeze", hard_facts.short_fact(INFO, None)["effect"])
 
+    def test_valuation_puts_every_pe_on_one_basis(self):
+        rows = hard_facts.pe_rows(*PE_DATA)
+        self.assertEqual(rows[0], ("KO", "The Coca-Cola Company", 28.0, 24.5))     # 98 / 3.5 and 98 / 4
+        self.assertEqual(rows[1][2:], (17.0, 16.0))                                   # PEP: price / EPS, both kinds
+        self.assertEqual(rows[2][2], hard_facts.LOSS)                                # no P/E on a loss
+        self.assertEqual(rows[3][3], hard_facts.BAD_FORECAST)                        # forecast 10x last year's profit
+        self.assertNotIn("ZZZ", [r[0] for r in rows])                                # no price, left out
+        f = hard_facts.valuation_fact(rows, TODAY)
+        self.assertEqual(f["source"], "Yahoo Finance")
+        self.assertEqual(f["topic"], "Valuation")
+        # Forward is compared; the median (of 16.0 and 20.0) skips peers without a usable forward P/E.
+        self.assertIn("On forward P/E it is 36% above the peer median (the middle value) of 18.0.", f["fact"])
+        self.assertIn("(PEP) 17.0 and 16.0", f["fact"])
+        self.assertIn("premium", f["effect"])
+
+    def test_valuation_falls_back_to_trailing_and_needs_peers(self):
+        prices, infos = {"AAA": 55.0, "BBB": 40.0, "CCC": 30.0}, {
+            "AAA": {"trailingEps": 5.0}, "BBB": {"trailingEps": 4.0, "forwardEps": 5.0}, "CCC": {"trailingEps": 2.0}}
+        f = hard_facts.valuation_fact(hard_facts.pe_rows(["AAA", "BBB", "CCC"], prices, infos), TODAY)
+        self.assertIn("On trailing P/E it is 12% below the peer median (the middle value) of 12.5.", f["fact"])
+        self.assertIn("about in line", f["effect"])
+        self.assertIn("pay less", hard_facts.valuation_fact(
+            hard_facts.pe_rows(["AAA", "CCC"], {"AAA": 20.0, "CCC": 30.0}, infos), TODAY)["effect"])
+        self.assertIsNone(hard_facts.valuation_fact(hard_facts.pe_rows(["AAA"], prices, infos), TODAY))
+        losing = {**infos, "AAA": {"trailingEps": -1.0}}
+        self.assertIsNone(hard_facts.valuation_fact(hard_facts.pe_rows(["AAA", "BBB"], prices, losing), TODAY))
+
+    def test_peers_come_from_the_override_or_yahoo_industry(self):
+        self.assertEqual(hard_facts.peers("PENG", {}), hard_facts.PEERS["PENG"])
+        top = pd.DataFrame({"name": list("abcdef")}, index=["KO", "PEP", "MNST", "KDP", "COKE", "CELH"])
+        with mock.patch.object(hard_facts.yf, "Industry", return_value=mock.Mock(top_companies=top)) as industry:
+            self.assertEqual(hard_facts.peers("KO", {"industryKey": "beverages-non-alcoholic"}),
+                             ["PEP", "MNST", "KDP", "COKE"])
+        industry.assert_called_once_with("beverages-non-alcoholic")
+        self.assertEqual(hard_facts.peers("XYZ", {}), [])                            # no industry, no peers
+
+
+PE_DATA = (["KO", "PEP", "LOSE", "SPLT", "ZZZ"],
+           {"KO": 98.0, "PEP": 136.0, "LOSE": 10.0, "SPLT": 50.0},
+           {"KO": {"longName": "Coca-Cola Company (The)", "trailingEps": 3.5, "forwardEps": 4.0},
+            "PEP": {"shortName": "PepsiCo", "trailingEps": 8.0, "forwardEps": 8.5},
+            "LOSE": {"trailingEps": -0.5, "forwardEps": 0.5},
+            "SPLT": {"trailingEps": 2.0, "forwardEps": 20.0}})
+
 
 RAW = """Here is what I found.
 TOPIC: The catalyst
@@ -285,6 +331,19 @@ IMPORTANCE: 3
 
 
 class Research(unittest.TestCase):
+    def test_prompt_ranks_sources_and_leaves_valuation_to_code(self):
+        rules = research.FORMAT
+        self.assertNotIn("Prefer the company's own filings", rules)
+        for text in ("Tier 1:", "sec.gov", "Tier 2:", "Reuters", "Bloomberg", "Aggregators:",
+                     "name the site in the FACT", "Never cite a copy of a filing"):
+            self.assertIn(text, rules)
+        self.assertIn("come only from the agency that publishes them", rules)
+        self.assertIn("Never from economic calendar websites.", rules)
+        self.assertLess(rules.index("Tier 1:"), rules.index("Tier 2:"))
+        self.assertLess(rules.index("Tier 2:"), rules.index("Aggregators:"))
+        self.assertIn("price multiples like P/E, forward P/E, PEG and price-to-sales", research.CODE_COVERS)
+        self.assertIn("Do not look up any price multiple", " ".join(research.PLANS["long"]["focus"].split()))
+
     def test_facts_without_how_or_when_are_dropped(self):
         facts, dropped = research.parse_facts(RAW, research.PLANS["catalyst"]["topics"])
         self.assertEqual(dropped, 1)
