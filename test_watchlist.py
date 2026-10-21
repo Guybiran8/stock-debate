@@ -338,7 +338,7 @@ class WatchlistTest(unittest.TestCase):
             for leak in (fake_value, fake_key_format, fake_value[-12:]):   # full value, key format, part of a value
                 (repo / "reports.html").write_text(f"page with {leak} inside", encoding="utf-8")
                 result = w.push_portfolio(TODAY, portfolio=repo, secrets={"TEST_KEY": fake_value},
-                                          push=lambda r: pushed.append(r))
+                                          push=lambda r: pushed.append(r), pull=lambda r: pushed.append(r))
                 self.assertEqual(result, "blocked")
                 self.assertEqual(self._log(repo), "start")                      # nothing committed
                 staged = subprocess.run(["git", "-C", str(repo), "diff", "--cached", "--name-only"],
@@ -364,17 +364,70 @@ class WatchlistTest(unittest.TestCase):
             pushed.append(repo)
             return subprocess.CompletedProcess([], 0, "", "")
 
+        ok_pull = lambda r: subprocess.CompletedProcess([], 0, "", "")  # noqa: E731
         with tempfile.TemporaryDirectory() as d:
             repo = self._repo(d)
-            self.assertEqual(w.push_portfolio(TODAY, portfolio=repo, secrets={}, push=fake_push), "no changes")
+            self.assertEqual(w.push_portfolio(TODAY, portfolio=repo, secrets={}, push=fake_push, pull=ok_pull),
+                             "no changes")
             (repo / "reports.html").write_text("new cards", encoding="utf-8")
             self.assertEqual(w.push_portfolio(TODAY, portfolio=repo, secrets={"TEST_KEY": "notInThePage123"},
-                                              push=fake_push), "pushed")
+                                              push=fake_push, pull=ok_pull), "pushed")
             self.assertEqual(self._log(repo), f"Daily scan {TODAY}")
             self.assertEqual(pushed, [repo])
             failing = lambda r: subprocess.CompletedProcess([], 1, "", "network down")  # noqa: E731
             (repo / "reports.html").write_text("newer cards", encoding="utf-8")
-            self.assertEqual(w.push_portfolio(TODAY, portfolio=repo, secrets={}, push=failing), "push failed")
+            self.assertEqual(w.push_portfolio(TODAY, portfolio=repo, secrets={}, push=failing, pull=ok_pull),
+                             "push failed")
+
+    def test_push_rebases_onto_laptop_push_and_aborts_on_conflict(self):
+        def git(repo, *args):
+            return subprocess.run(["git", "-C", str(repo), *args], check=True, capture_output=True, text=True).stdout
+
+        def plain_push(repo):     # the real one adds the GitHub CLI login; not needed for a local remote
+            return subprocess.run(["git", "-C", str(repo), "push", "-q", "origin", "HEAD"], capture_output=True, text=True)
+
+        def plain_pull(repo):
+            return subprocess.run(["git", "-C", str(repo), "pull", "--rebase", "-q", "origin", "HEAD"],
+                                  capture_output=True, text=True)
+
+        with tempfile.TemporaryDirectory() as d:
+            start = self._repo(d)
+            remote = Path(d) / "remote.git"
+            subprocess.run(["git", "clone", "-q", "--bare", str(start), str(remote)], check=True, capture_output=True)
+            clones = {}
+            for name in ("scan", "laptop"):
+                clones[name] = Path(d) / name
+                subprocess.run(["git", "clone", "-q", str(remote), str(clones[name])], check=True, capture_output=True)
+                git(clones[name], "config", "user.name", "t")
+                git(clones[name], "config", "user.email", "t@example.com")
+            scan, laptop = clones["scan"], clones["laptop"]
+
+            # The laptop pushes a different file first; the scan's push used to be rejected here.
+            (laptop / "about.html").write_text("about", encoding="utf-8")
+            git(laptop, "add", "-A")
+            git(laptop, "commit", "-q", "-m", "laptop edit")
+            git(laptop, "push", "-q", "origin", "HEAD")
+            (scan / "reports.html").write_text("new cards", encoding="utf-8")
+            self.assertEqual(w.push_portfolio(TODAY, portfolio=scan, secrets={}, push=plain_push, pull=plain_pull),
+                             "pushed")
+            self.assertEqual(git(remote, "log", "--format=%s", "main").splitlines()[:2],
+                             [f"Daily scan {TODAY}", "laptop edit"])
+
+            # The laptop then changes the same file the scan changes: the rebase conflicts.
+            git(laptop, "pull", "-q", "origin", "main")
+            (laptop / "reports.html").write_text("laptop cards", encoding="utf-8")
+            git(laptop, "commit", "-q", "-am", "laptop reports")
+            git(laptop, "push", "-q", "origin", "HEAD")
+            (scan / "reports.html").write_text("newer cards", encoding="utf-8")
+            pushed = []
+            self.assertEqual(w.push_portfolio(TODAY, portfolio=scan, secrets={}, pull=plain_pull,
+                                              push=lambda r: pushed.append(r)), "pull failed")
+            self.assertEqual(pushed, [])                                          # nothing pushed
+            self.assertFalse(w._rebase_in_progress(scan))                         # rebase aborted
+            self.assertEqual(git(scan, "status", "--porcelain"), "")              # clean tree
+            self.assertEqual(self._log(scan), f"Daily scan {TODAY}")              # commit kept locally
+            self.assertEqual((scan / "reports.html").read_text(encoding="utf-8"), "newer cards")
+            self.assertEqual(git(remote, "log", "-1", "--format=%s", "main").strip(), "laptop reports")
 
     def test_catalyst_file_needs_future_date_and_source(self):
         with tempfile.NamedTemporaryFile("w", suffix=".csv", delete=False, encoding="utf-8") as f:

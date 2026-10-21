@@ -462,18 +462,33 @@ def publish_to_portfolio(page_path, report_paths, today, portfolio=PORTFOLIO_DIR
     return copied + ["reports.html", "stocks/"]
 
 
-def _git_push(repo):
-    # Push with the GitHub CLI's login so it never waits on a hidden password prompt.
+def _git_remote(repo, *args):
+    # Runs git with the GitHub CLI's login so it never waits on a hidden password prompt.
     gh = (shutil.which("gh") or "C:/Program Files/GitHub CLI/gh.exe").replace("\\", "/")
     return subprocess.run(
         ["git", "-C", str(repo), "-c", "credential.helper=", "-c", f'credential.helper=!"{gh}" auth git-credential',
-         "push", "-q", "origin", "HEAD"],
+         *args],
         capture_output=True, text=True, timeout=120, env={**os.environ, "GIT_TERMINAL_PROMPT": "0"})
 
 
-def push_portfolio(today, portfolio=PORTFOLIO_DIR, secrets=None, push=_git_push):
-    """Commits and pushes the portfolio, but only if the secret scan finds nothing.
-    Returns "pushed", "no changes", "blocked", "no repo", "commit failed" or "push failed"."""
+def _git_push(repo):
+    return _git_remote(repo, "push", "-q", "origin", "HEAD")
+
+
+def _git_pull(repo):
+    # Puts the scan commit on top of anything pushed from elsewhere (like the laptop), so the push isn't rejected.
+    return _git_remote(repo, "pull", "--rebase", "-q", "origin", "HEAD")
+
+
+def _rebase_in_progress(repo):
+    git_dir = Path(repo) / ".git"
+    return (git_dir / "rebase-merge").exists() or (git_dir / "rebase-apply").exists()
+
+
+def push_portfolio(today, portfolio=PORTFOLIO_DIR, secrets=None, push=_git_push, pull=_git_pull):
+    """Commits the portfolio, pulls with rebase, then pushes, but only if the secret scan finds nothing.
+    If the rebase hits a conflict it is aborted and nothing is pushed; the commit stays local.
+    Returns "pushed", "no changes", "blocked", "no repo", "commit failed", "pull failed" or "push failed"."""
     import secret_scan
 
     portfolio = Path(portfolio)
@@ -500,6 +515,17 @@ def push_portfolio(today, portfolio=PORTFOLIO_DIR, secrets=None, push=_git_push)
     if commit.returncode:
         print(f"Commit failed: {commit.stderr.strip() or commit.stdout.strip()}")
         return "commit failed"
+    try:
+        pulled = pull(portfolio)
+    except subprocess.TimeoutExpired:
+        pulled = subprocess.CompletedProcess([], 1, "", "timed out")
+    if pulled.returncode:
+        aborted = _rebase_in_progress(portfolio)
+        if aborted:
+            git("rebase", "--abort")
+        print(f"Pull failed{' with a rebase conflict, so the rebase was aborted' if aborted else ''}: "
+              f"{pulled.stderr.strip() or pulled.stdout.strip()}. Nothing was pushed; the commit is saved locally.")
+        return "pull failed"
     try:
         result = push(portfolio)
     except subprocess.TimeoutExpired:
