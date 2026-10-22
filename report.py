@@ -203,7 +203,7 @@ REPORT_HEAD = (
 )
 REPORT_NAV = (
     "<nav class='nav'><div class='wrap'><a class='home' href='../index.html'>Guy Biran</a>"
-    "<ul><li><a href='../index.html'>Projects</a></li>"
+    "<ul><li><a href='../index.html#projects'>Projects</a></li>"
     "<li><a href='../reports.html' aria-current='page'>Reports</a></li></ul></div></nav>"
 )
 
