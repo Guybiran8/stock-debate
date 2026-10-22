@@ -219,6 +219,9 @@ class WatchlistTest(unittest.TestCase):
             self.assertTrue(page.startswith(top) and page.endswith(bottom))
             self.assertNotIn("old card", page)
             self.assertNotIn("Daily watchlist", page)                    # the separate card is gone
+            self.assertIn('<p class="reports-lead">These are 45 stocks I picked. Click any one to follow its chart and '
+                          "reports, so it's easier to understand what the stock is doing.</p>", page)
+            self.assertLess(page.index('class="reports-lead"'), page.index('id="report-search"'))
             self.assertLess(page.index('id="report-search"'), page.index('class="group-filters"'))
             self.assertLess(page.index('class="group-filters"'), page.index('class="scan-line"'))
             self.assertLess(page.index('class="scan-line"'), page.index('class="cards stock-cards"'))
