@@ -382,55 +382,131 @@ class WatchlistTest(unittest.TestCase):
             self.assertEqual(w.push_portfolio(TODAY, portfolio=repo, secrets={}, push=failing, pull=ok_pull),
                              "push failed")
 
-    def test_push_rebases_onto_laptop_push_and_aborts_on_conflict(self):
-        def git(repo, *args):
-            return subprocess.run(["git", "-C", str(repo), *args], check=True, capture_output=True, text=True).stdout
+    def _clones(self, d):
+        """A bare remote with a "scan" clone and a "laptop" clone, like GitHub, the VPS and the laptop."""
+        start = self._repo(d)
+        remote = Path(d) / "remote.git"
+        subprocess.run(["git", "clone", "-q", "--bare", str(start), str(remote)], check=True, capture_output=True)
+        clones = {}
+        for name in ("scan", "laptop"):
+            clones[name] = Path(d) / name
+            subprocess.run(["git", "clone", "-q", str(remote), str(clones[name])], check=True, capture_output=True)
+            self._git(clones[name], "config", "user.name", "t")
+            self._git(clones[name], "config", "user.email", "t@example.com")
+        return remote, clones["scan"], clones["laptop"]
 
-        def plain_push(repo):     # the real one adds the GitHub CLI login; not needed for a local remote
-            return subprocess.run(["git", "-C", str(repo), "push", "-q", "origin", "HEAD"], capture_output=True, text=True)
+    @staticmethod
+    def _git(repo, *args):
+        return subprocess.run(["git", "-C", str(repo), *args], check=True, capture_output=True, text=True).stdout
 
-        def plain_pull(repo):
-            return subprocess.run(["git", "-C", str(repo), "pull", "--rebase", "-q", "origin", "HEAD"],
-                                  capture_output=True, text=True)
+    @staticmethod
+    def _plain_push(repo):     # the real one adds the GitHub CLI login; not needed for a local remote
+        return subprocess.run(["git", "-C", str(repo), "push", "-q", "origin", "HEAD"], capture_output=True, text=True)
 
+    @staticmethod
+    def _plain_pull(repo):
+        return subprocess.run(["git", "-C", str(repo), "pull", "--rebase", "-q", "origin", "HEAD"],
+                              capture_output=True, text=True)
+
+    def _laptop_commit(self, laptop, files, msg):
+        self._git(laptop, "pull", "-q", "origin", "main")
+        for name, text in files.items():
+            (laptop / name).parent.mkdir(parents=True, exist_ok=True)
+            (laptop / name).write_text(text, encoding="utf-8")
+        self._git(laptop, "add", "-A")
+        self._git(laptop, "commit", "-q", "-m", msg)
+        self._git(laptop, "push", "-q", "origin", "HEAD")
+
+    def test_push_rebases_onto_laptop_push(self):
         with tempfile.TemporaryDirectory() as d:
-            start = self._repo(d)
-            remote = Path(d) / "remote.git"
-            subprocess.run(["git", "clone", "-q", "--bare", str(start), str(remote)], check=True, capture_output=True)
-            clones = {}
-            for name in ("scan", "laptop"):
-                clones[name] = Path(d) / name
-                subprocess.run(["git", "clone", "-q", str(remote), str(clones[name])], check=True, capture_output=True)
-                git(clones[name], "config", "user.name", "t")
-                git(clones[name], "config", "user.email", "t@example.com")
-            scan, laptop = clones["scan"], clones["laptop"]
-
+            remote, scan, laptop = self._clones(d)
             # The laptop pushes a different file first; the scan's push used to be rejected here.
-            (laptop / "about.html").write_text("about", encoding="utf-8")
-            git(laptop, "add", "-A")
-            git(laptop, "commit", "-q", "-m", "laptop edit")
-            git(laptop, "push", "-q", "origin", "HEAD")
+            self._laptop_commit(laptop, {"about.html": "about"}, "laptop edit")
             (scan / "reports.html").write_text("new cards", encoding="utf-8")
-            self.assertEqual(w.push_portfolio(TODAY, portfolio=scan, secrets={}, push=plain_push, pull=plain_pull),
-                             "pushed")
-            self.assertEqual(git(remote, "log", "--format=%s", "main").splitlines()[:2],
+            self.assertEqual(w.push_portfolio(TODAY, portfolio=scan, secrets={}, push=self._plain_push,
+                                              pull=self._plain_pull), "pushed")
+            self.assertEqual(self._git(remote, "log", "--format=%s", "main").splitlines()[:2],
                              [f"Daily scan {TODAY}", "laptop edit"])
 
-            # The laptop then changes the same file the scan changes: the rebase conflicts.
-            git(laptop, "pull", "-q", "origin", "main")
-            (laptop / "reports.html").write_text("laptop cards", encoding="utf-8")
-            git(laptop, "commit", "-q", "-am", "laptop reports")
-            git(laptop, "push", "-q", "origin", "HEAD")
-            (scan / "reports.html").write_text("newer cards", encoding="utf-8")
+    def test_conflict_only_in_generated_files_keeps_the_scans_version(self):
+        with tempfile.TemporaryDirectory() as d:
+            remote, scan, laptop = self._clones(d)
+            # Like Oct 21: the laptop rebuilds the generated pages and pushes before the scan does.
+            self._laptop_commit(laptop, {"reports.html": "laptop cards", "stocks/MRNA.html": "laptop 245.81",
+                                         "reports/watchlist.html": "laptop list", "index.html": "laptop home"},
+                                "laptop rebuild")
+            (scan / "stocks").mkdir()
+            (scan / "reports").mkdir()
+            (scan / "reports.html").write_text("scan cards", encoding="utf-8")
+            (scan / "stocks" / "MRNA.html").write_text("scan 202.63", encoding="utf-8")
+            (scan / "reports" / "watchlist.html").write_text("scan list", encoding="utf-8")
+            self.assertEqual(w.push_portfolio(TODAY, portfolio=scan, secrets={}, push=self._plain_push,
+                                              pull=self._plain_pull), "pushed")
+            self.assertFalse(w._rebase_in_progress(scan))
+            for name, text in (("reports.html", "scan cards"), ("stocks/MRNA.html", "scan 202.63"),
+                               ("reports/watchlist.html", "scan list"), ("index.html", "laptop home")):
+                self.assertEqual(self._git(remote, "show", f"main:{name}"), text)
+
+    def test_conflict_in_another_file_aborts_and_pushes_nothing(self):
+        with tempfile.TemporaryDirectory() as d:
+            remote, scan, laptop = self._clones(d)
+            self._laptop_commit(laptop, {"index.html": "laptop home", "reports.html": "laptop cards"}, "laptop home")
+            (scan / "index.html").write_text("scan home", encoding="utf-8")      # not a generated file
+            (scan / "reports.html").write_text("scan cards", encoding="utf-8")
             pushed = []
-            self.assertEqual(w.push_portfolio(TODAY, portfolio=scan, secrets={}, pull=plain_pull,
+            self.assertEqual(w.push_portfolio(TODAY, portfolio=scan, secrets={}, pull=self._plain_pull,
                                               push=lambda r: pushed.append(r)), "pull failed")
             self.assertEqual(pushed, [])                                          # nothing pushed
             self.assertFalse(w._rebase_in_progress(scan))                         # rebase aborted
-            self.assertEqual(git(scan, "status", "--porcelain"), "")              # clean tree
+            self.assertEqual(self._git(scan, "status", "--porcelain"), "")        # clean tree
             self.assertEqual(self._log(scan), f"Daily scan {TODAY}")              # commit kept locally
-            self.assertEqual((scan / "reports.html").read_text(encoding="utf-8"), "newer cards")
-            self.assertEqual(git(remote, "log", "-1", "--format=%s", "main").strip(), "laptop reports")
+            self.assertEqual(self._git(remote, "log", "-1", "--format=%s", "main").strip(), "laptop home")
+
+    def test_scan_pulls_before_building(self):
+        with tempfile.TemporaryDirectory() as d:
+            remote, scan, laptop = self._clones(d)
+            self._laptop_commit(laptop, {"index.html": "laptop home"}, "laptop home")
+            w.sync_portfolio(scan, pull=self._plain_pull)
+            self.assertEqual((scan / "index.html").read_text(encoding="utf-8"), "laptop home")
+            # A scan commit left behind by an earlier failed run is rebased too, generated conflicts settled
+            (scan / "reports.html").write_text("old scan cards", encoding="utf-8")
+            self._git(scan, "add", "-A")
+            self._git(scan, "commit", "-q", "-m", "stuck scan")
+            self._laptop_commit(laptop, {"reports.html": "laptop cards"}, "laptop cards")
+            w.sync_portfolio(scan, pull=self._plain_pull)
+            self.assertFalse(w._rebase_in_progress(scan))
+            self.assertEqual(self._git(scan, "log", "--format=%s", "-2").splitlines(), ["stuck scan", "laptop cards"])
+
+    def test_generated_files(self):
+        for f in ("reports.html", "stocks/MRNA.html", "reports/watchlist.html", "reports/watchlist-2026-10-22.html"):
+            self.assertTrue(w.is_generated(f), f)
+        for f in ("index.html", "style.css", "reports/MRNA-2026-10-22.html", "stock-debate.html"):
+            self.assertFalse(w.is_generated(f), f)
+
+    def _run_with(self, push_status, copied=("reports.html",)):
+        with tempfile.TemporaryDirectory() as d, \
+                mock.patch.multiple(w, load_watchlist=lambda: [], download_prices=lambda t: {},
+                                    fetch_profiles=lambda t: {}, score_all=lambda *a: ([], []),
+                                    load_catalysts=lambda **k: {}, auto_reports=lambda *a: [],
+                                    build_page=lambda *a: "page", REPORTS_DIR=Path(d),
+                                    publish_to_portfolio=lambda *a, **k: list(copied),
+                                    push_portfolio=lambda today: push_status, sync_portfolio=lambda: None), \
+                mock.patch.object(w_page, "save_scan", lambda *a: None), \
+                mock.patch("builtins.print") as out:
+            status = w.run(ran_reports=False)[3]
+        return status, " ".join(str(c.args[0]) for c in out.call_args_list if c.args)
+
+    def test_run_says_failed_whenever_the_push_does_not_happen(self):
+        for push_status in ("pull failed", "push failed", "blocked", "commit failed", "no repo"):
+            status, printed = self._run_with(push_status)
+            self.assertEqual(status, push_status)
+            self.assertIn("FAILED", printed)
+        status, printed = self._run_with("pushed", copied=())     # portfolio missing: nothing published
+        self.assertEqual(status, "not published")
+        self.assertIn("FAILED", printed)
+        status, printed = self._run_with("pushed")
+        self.assertEqual(status, "pushed")
+        self.assertNotIn("FAILED", printed)
 
     def test_catalyst_file_needs_future_date_and_source(self):
         with tempfile.NamedTemporaryFile("w", suffix=".csv", delete=False, encoding="utf-8") as f:
@@ -442,6 +518,69 @@ class WatchlistTest(unittest.TestCase):
             self.assertEqual(list(w.load_catalysts(f.name, today=TODAY)), ["AAA"])
         finally:
             os.unlink(f.name)
+
+
+class ScanCheckTest(unittest.TestCase):
+    """scan_check.py: the live-site check after each scan and its Telegram alert."""
+
+    def setUp(self):
+        import scan_check
+        self.c = scan_check
+        self.day = date(2026, 10, 23)
+
+    def test_reads_the_scan_line(self):
+        page = '<p class="scan-line">Scan of Oct 23: 0 Top · 12 Watch closely · <a href="x">list</a></p>'
+        self.assertEqual(self.c.live_scan_label(page), "Scan of Oct 23")
+        self.assertEqual(self.c.scan_label(date(2026, 11, 3)), "Scan of Nov 3")
+        self.assertIsNone(self.c.live_scan_label("<p>nothing here</p>"))
+
+    def test_problem_only_when_failed_or_stale(self):
+        self.assertIsNone(self.c.problem(self.day, 0, "Scan of Oct 23", []))
+        stale = self.c.problem(self.day, 0, "Scan of Oct 22", [])
+        self.assertIn('"Scan of Oct 22" instead of "Scan of Oct 23"', stale)
+        failed = self.c.problem(self.day, 1, "Scan of Oct 23", ["FAILED: the portfolio was not pushed (pull failed)."])
+        self.assertIn("exited with 1", failed)
+        self.assertIn("pull failed", failed)
+
+    def test_waits_for_the_page_to_update(self):
+        pages = iter(['<p class="scan-line">Scan of Oct 22: x', '<p class="scan-line">Scan of Oct 23: x'])
+        naps = []
+        self.assertEqual(self.c.wait_for_live(self.day, fetch=lambda: next(pages), wait=60, poll=1,
+                                              sleep=naps.append), "Scan of Oct 23")
+        self.assertEqual(naps, [1])
+        # Gives up after the wait and reports what it saw
+        self.assertEqual(self.c.wait_for_live(self.day, fetch=lambda: '<p class="scan-line">Scan of Oct 22: x',
+                                              wait=0, sleep=naps.append), "Scan of Oct 22")
+
+    def test_failed_lines_come_from_the_last_run(self):
+        with tempfile.NamedTemporaryFile("w", suffix=".log", delete=False, encoding="utf-8") as f:
+            f.write("===== scan start =====\nFAILED: old run\n===== scan start =====\nok\n"
+                    "FAILED: the portfolio was not pushed (pull failed).\n")
+        try:
+            self.assertEqual(self.c.failed_lines(f.name), ["FAILED: the portfolio was not pushed (pull failed)."])
+            self.assertEqual(self.c.failed_lines(None), [])
+        finally:
+            os.unlink(f.name)
+
+    def test_telegram_never_prints_the_token(self):
+        token = "1234" + "56789:" + "FAKE" * 9     # built here so this file never matches itself
+        sent = []
+
+        def post(url, json, timeout):
+            sent.append((url, json))
+            return mock.Mock(status_code=200)
+
+        def broken(url, json, timeout):
+            raise ConnectionError(f"could not reach {url}")
+
+        with mock.patch("builtins.print") as out:
+            self.assertTrue(self.c.send_telegram("hi", settings=lambda: (token, "42"), post=post))
+            self.assertFalse(self.c.send_telegram("hi", settings=lambda: (token, "42"), post=broken))
+            self.assertFalse(self.c.send_telegram("hi", settings=lambda: (None, None), post=post))
+        self.assertEqual(sent, [(f"https://api.telegram.org/bot{token}/sendMessage", {"chat_id": "42", "text": "hi"})])
+        printed = " ".join(str(c.args) for c in out.call_args_list)
+        self.assertNotIn(token, printed)
+        self.assertNotIn(token[-12:], printed)
 
 
 if __name__ == "__main__":

@@ -39,10 +39,13 @@ AUTO REPORTS
 - Run "python watchlist.py --no-reports" for the free scan only.
 
 PUBLISHING
-- Each run copies the watchlist page and new reports into ../portfolio and rebuilds its
-  reports pages, then commits and pushes the portfolio repo. Before committing, every staged
-  file goes through secret_scan.py (the .env key values and common key formats). If it finds
-  anything, the files are unstaged and nothing is committed or pushed.
+- Each run pulls ../portfolio (rebase) first, copies the watchlist page and new reports into it,
+  rebuilds its reports pages, commits, pulls with rebase again and pushes. Before committing,
+  every staged file goes through secret_scan.py (the .env key values and common key formats).
+  If it finds anything, the files are unstaged and nothing is committed or pushed.
+- reports.html, stocks/ and reports/watchlist* are built only by this scan. If a rebase conflicts
+  only in those files, the scan's version is kept. A conflict in any other file aborts the rebase.
+- Whenever a push was wanted but didn't happen, the run prints a FAILED line and exits with 1.
 - Run with "--no-push" to update the portfolio files without committing or pushing.
 
 ROOM TO MOVE
@@ -485,9 +488,72 @@ def _rebase_in_progress(repo):
     return (git_dir / "rebase-merge").exists() or (git_dir / "rebase-apply").exists()
 
 
+def is_generated(path):
+    # Portfolio files only the scan builds; in a conflict the scan's copy is the right one.
+    return path == "reports.html" or path.startswith("stocks/") or path.startswith("reports/watchlist")
+
+
+def _settle_rebase(repo):
+    """Finishes a rebase that stopped on conflicts by keeping the scan's version of generated files.
+    If any other file conflicts, the rebase is aborted. Returns the files that blocked it ([] if it finished)."""
+    def git(*args):
+        return subprocess.run(["git", "-C", str(repo), *args], capture_output=True, text=True,
+                              env={**os.environ, "GIT_EDITOR": "true"})
+
+    while _rebase_in_progress(repo):
+        conflicted = git("diff", "--name-only", "--diff-filter=U").stdout.splitlines()
+        other = [f for f in conflicted if not is_generated(f)]
+        if other or not conflicted:
+            git("rebase", "--abort")
+            return other or ["(the rebase stopped without a conflicted file)"]
+        for f in conflicted:
+            # During a rebase "theirs" is the commit being replayed, which is the scan's
+            if git("checkout", "--theirs", "--", f).returncode:
+                git("rm", "-q", "--", f)      # the scan deleted it
+            else:
+                git("add", "--", f)
+        # If the upstream copy already matches the scan's, this step has nothing left to commit
+        step = git("rebase", "--skip" if git("diff", "--cached", "--quiet").returncode == 0 else "--continue")
+        if step.returncode and _rebase_in_progress(repo) and not git("diff", "--name-only", "--diff-filter=U").stdout:
+            git("rebase", "--abort")
+            return [f"(rebase --continue failed: {step.stderr.strip() or step.stdout.strip()})"]
+    return []
+
+
+def _pull_rebase(portfolio, pull):
+    """Pulls with rebase, settling conflicts in generated files. Returns None if it worked, else why not."""
+    try:
+        pulled = pull(portfolio)
+    except subprocess.TimeoutExpired:
+        return "the pull timed out"
+    if not pulled.returncode:
+        return None
+    if not _rebase_in_progress(portfolio):
+        return pulled.stderr.strip() or pulled.stdout.strip()
+    blocked = _settle_rebase(portfolio)
+    if blocked:
+        return f"rebase conflict outside the generated files ({', '.join(blocked)}), so the rebase was aborted"
+    print("Pull hit a conflict only in generated files; kept the scan's version.")
+    return None
+
+
+def sync_portfolio(portfolio=PORTFOLIO_DIR, pull=_git_pull):
+    """Pulls the portfolio before the pages are built, so they are built on top of the latest site."""
+    portfolio = Path(portfolio)
+    if not (portfolio / ".git").exists():
+        return
+    dirty = subprocess.run(["git", "-C", str(portfolio), "status", "--porcelain"], capture_output=True, text=True).stdout
+    if dirty:
+        print("Portfolio has uncommitted changes, so it wasn't pulled before building; it is pulled again before the push.")
+        return
+    why = _pull_rebase(portfolio, pull)
+    print("Pulled the portfolio before building." if why is None else f"Pull before building failed: {why}")
+
+
 def push_portfolio(today, portfolio=PORTFOLIO_DIR, secrets=None, push=_git_push, pull=_git_pull):
     """Commits the portfolio, pulls with rebase, then pushes, but only if the secret scan finds nothing.
-    If the rebase hits a conflict it is aborted and nothing is pushed; the commit stays local.
+    A rebase conflict only in generated files keeps the scan's version; any other conflict aborts the rebase
+    and nothing is pushed (the commit stays local).
     Returns "pushed", "no changes", "blocked", "no repo", "commit failed", "pull failed" or "push failed"."""
     import secret_scan
 
@@ -515,16 +581,9 @@ def push_portfolio(today, portfolio=PORTFOLIO_DIR, secrets=None, push=_git_push,
     if commit.returncode:
         print(f"Commit failed: {commit.stderr.strip() or commit.stdout.strip()}")
         return "commit failed"
-    try:
-        pulled = pull(portfolio)
-    except subprocess.TimeoutExpired:
-        pulled = subprocess.CompletedProcess([], 1, "", "timed out")
-    if pulled.returncode:
-        aborted = _rebase_in_progress(portfolio)
-        if aborted:
-            git("rebase", "--abort")
-        print(f"Pull failed{' with a rebase conflict, so the rebase was aborted' if aborted else ''}: "
-              f"{pulled.stderr.strip() or pulled.stdout.strip()}. Nothing was pushed; the commit is saved locally.")
+    why = _pull_rebase(portfolio, pull)
+    if why:
+        print(f"Pull failed: {why}. Nothing was pushed; the commit is saved locally.")
         return "pull failed"
     try:
         result = push(portfolio)
@@ -539,7 +598,11 @@ def push_portfolio(today, portfolio=PORTFOLIO_DIR, secrets=None, push=_git_push,
 
 
 def run(ran_reports=True, runner=_run_full_report, push=True):
+    """Returns (results, skipped, outcomes, push status). The status is "pushed", "no changes", "skipped"
+    (--no-push) or why the push didn't happen."""
     today = datetime.now(ZoneInfo("America/Los_Angeles")).date()
+    if push:
+        sync_portfolio()
     tickers = load_watchlist()
     print(f"Scanning {len(tickers)} tickers...")
     prices = download_prices(tickers)
@@ -573,12 +636,16 @@ def run(ran_reports=True, runner=_run_full_report, push=True):
     portfolio_page.save_scan(today, groups)
     copied = publish_to_portfolio(out, [p for _, o, p in outcomes if p], today, prices=prices, names=names,
                                   scan={"date": today, "groups": groups})
+    status = "skipped"
     if copied:
         print(f"Copied to portfolio: {', '.join(copied)}")
-        if push:
-            push_portfolio(today)
-    return results, skipped, outcomes
+    if push:
+        status = push_portfolio(today) if copied else "not published"
+        if status not in ("pushed", "no changes"):
+            print(f"FAILED: the portfolio was not pushed ({status}). The live site still shows the last pushed scan.")
+    return results, skipped, outcomes, status
 
 
 if __name__ == "__main__":
-    run(ran_reports="--no-reports" not in sys.argv, push="--no-push" not in sys.argv)
+    status = run(ran_reports="--no-reports" not in sys.argv, push="--no-push" not in sys.argv)[3]
+    sys.exit(0 if status in ("pushed", "no changes", "skipped") else 1)
