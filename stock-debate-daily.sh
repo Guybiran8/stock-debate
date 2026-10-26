@@ -1,6 +1,7 @@
 #!/bin/bash
 # Daily stock-debate scan on the VPS: git pull, then watchlist.py, appending to a size-capped log, then
-# scan_check.py, which checks the live site and sends a Telegram alert if the push failed or the page is stale.
+# scan_check.py, which checks the live site and sends a Telegram alert if the push failed or the page is stale,
+# then price_check.py, which compares Yahoo closes with Tiingo's and sends a Telegram alert if they differ.
 # Installed as a symlink: /root/.local/bin/stock-debate-daily.sh -> /root/stock-debate/stock-debate-daily.sh
 # Cron fires at 21:15 and 22:15 UTC on weekdays; only the one that lands on 17:xx New York
 # time runs, so daylight saving is handled without CRON_TZ.
@@ -52,4 +53,8 @@ case " $* " in
     *" --no-push "*) ;;
     *) PYTHONUNBUFFERED=1 .venv/bin/python scan_check.py "$status" "$LOG" ;;
 esac
+
+# Private Yahoo vs Tiingo price alarm. It waits for Tiingo's close, always exits 0, and its outcome
+# never changes the scan's exit status.
+PYTHONUNBUFFERED=1 timeout 90m .venv/bin/python price_check.py || echo "price check: timed out or crashed (exit $?)"
 exit $status

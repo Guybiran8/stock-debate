@@ -20,3 +20,7 @@ To change how those pages look: change `portfolio_page.py` here, push it, and le
 - Log: `/root/.local/state/stock-debate/scan.log`. A run that didn't push ends with a `FAILED` line.
 - `scan_check.py` then checks that https://guybiran8.github.io/reports.html shows "Scan of <today>" and
   sends a Telegram message through the trading agent's bot if not.
+- `price_check.py` runs last: it compares Yahoo closes with Tiingo's (key `TIINGO_API_KEY` in `.env`, VPS only)
+  and sends a Telegram alert on a gap over 1% or a date mismatch. It checks half the watchlist per run (max 45,
+  free plan is 50 requests/hour, 500 symbols/month); state is in `/root/.local/state/stock-debate/price-check.json`.
+  Tiingo's free plan is internal use only: never show Tiingo data on the website or in reports.
