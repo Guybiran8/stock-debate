@@ -210,6 +210,7 @@ class WatchlistTest(unittest.TestCase):
             scan = {"date": TODAY, "groups": {"SOFI": "Watch closely", "NVDA": "Reject", "NODATA": "Reject"}}
             built = w_page.build(port, TODAY, prices={"NVDA": fake_candles("nvda")}, names={"SOFI": "SoFi Technologies"},
                                  download=download, fetch_names=fetch_names, watchlist=["SOFI", "NVDA", "NODATA"],
+                                 names_file=port / "names.json",
                                  scan=scan)
             page = (port / "reports.html").read_text(encoding="utf-8")
 
@@ -279,11 +280,30 @@ class WatchlistTest(unittest.TestCase):
             with mock.patch.object(w_page, "LATEST_SCAN", saved):        # no scan passed: the saved one is used
                 w_page.build(port, TODAY, prices={t: fake_candles(t) for t in ["NVDA", "KO", "SOFI"]},
                              names={"SOFI": "SoFi"}, download=download, fetch_names=fetch_names,
-                             watchlist=["SOFI", "NVDA", "NODATA"])
+                             watchlist=["SOFI", "NVDA", "NODATA"], names_file=port / "names.json")
             again = (port / "reports.html").read_text(encoding="utf-8")
             self.assertEqual(again.count('id="report-search"'), 1)
             self.assertIn("Scan of Oct 15: 1 Top · 0 Watch closely", again)
             self.assertTrue(again.startswith(top) and again.endswith(bottom))
+
+            # Oct 26, 2026: Yahoo refused most requests and 62 of 68 cards had no name.
+            # A name from an earlier build stays, and a refused one gets one more try.
+            (port / "stocks" / "NODATA.html").write_text('<p class="name">No Data Inc</p>', encoding="utf-8")
+            (port / "names.json").write_text("{}", encoding="utf-8")
+            tries = []
+
+            def refuses_first(tickers):
+                tries.append(list(tickers))
+                return {t: ("Second Try Inc" if len(tries) > 1 else None) for t in tickers}
+            with mock.patch.object(w_page, "RETRY_PAUSE", 0):
+                built = w_page.build(port, TODAY, prices={t: fake_candles(t) for t in ["NVDA", "KO", "SOFI", "NEW"]},
+                                     names={}, download=download, fetch_names=refuses_first, scan=scan,
+                                     watchlist=["SOFI", "NVDA", "NODATA", "NEW"], names_file=port / "names.json")
+            self.assertEqual(built["no_name"], [])
+            self.assertEqual(tries, [["NEW"], ["NEW"]])     # SOFI and NODATA came from the last build's pages
+            saved_names = json.loads((port / "names.json").read_text(encoding="utf-8"))
+            self.assertEqual((saved_names["NODATA"], saved_names["NEW"], saved_names["SOFI"]),
+                             ("No Data Inc", "Second Try Inc", "SoFi"))
 
     def test_status_tag(self):
         self.assertEqual(w_page.status_tag(110, 100, 90, True), "At highs")

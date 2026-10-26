@@ -16,11 +16,16 @@ Report ages are recomputed in the browser, so they stay right on days the scan d
 STATUS TAG (first that applies): No chart data, At highs, Downtrend, Below 200-day,
 Below 50-day, Uptrend, Mixed.
 
+COMPANY NAMES (first that has one): names passed in, the latest report's title, NAMES_FILE and
+the names on the current stock pages, then Yahoo. Yahoo often refuses a burst of requests, so
+the ones it misses get one more try, one at a time. Every name found is saved to NAMES_FILE.
+
 Run "python portfolio_page.py" to rebuild the pages alone.
 """
 import html
 import json
 import re
+import time
 from datetime import date, datetime
 from pathlib import Path
 from zoneinfo import ZoneInfo
@@ -42,6 +47,31 @@ LIB = "https://unpkg.com/lightweight-charts@4.2.0/dist/lightweight-charts.standa
 # Shown at the top of reports.html, under the heading, in Guy's own words
 LEAD = ("These are 45 stocks I picked. Click any one to follow its chart and reports, "
         "so it's easier to understand what the stock is doing.")
+# Company names from earlier builds (on the VPS, not in git), so a day Yahoo refuses requests keeps them.
+NAMES_FILE = Path.home() / ".local/state/stock-debate/company-names.json"
+RETRY_PAUSE = 10        # seconds before asking Yahoo again for the names it missed
+
+
+def load_names(path=NAMES_FILE):
+    try:
+        return json.loads(Path(path).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+
+
+def save_names(names, path=NAMES_FILE):
+    Path(path).parent.mkdir(parents=True, exist_ok=True)
+    Path(path).write_text(json.dumps(dict(sorted(names.items())), indent=1), encoding="utf-8")
+
+
+def page_names(stocks_dir):
+    """{ticker: name} from the stock pages the last build wrote."""
+    out = {}
+    for f in Path(stocks_dir).glob("*.html"):
+        m = re.search(r'<p class="name">([^<]+)</p>', f.read_text(encoding="utf-8", errors="replace"))
+        if m:
+            out[f.stem] = html.unescape(m.group(1))
+    return out
 
 
 def find_reports(reports_dir):
@@ -474,7 +504,7 @@ def stock_page(stock, today, chrome):
 
 
 def build(portfolio=PORTFOLIO_DIR, today=None, prices=None, names=None, download=None,
-          fetch_names=None, watchlist=None, scan=None):
+          fetch_names=None, watchlist=None, scan=None, names_file=NAMES_FILE):
     """Rebuilds reports.html and every stocks/TICKER.html. prices is an optional
     {ticker: candles} dict and names an optional {ticker: company name} dict already
     fetched (for example by the watchlist scan); anything missing is downloaded.
@@ -502,12 +532,20 @@ def build(portfolio=PORTFOLIO_DIR, today=None, prices=None, names=None, download
     for t, rs in reports.items():
         if rs[0]["name"]:
             names[t] = rs[0]["name"]
+    known = {**page_names(stocks_dir), **load_names(names_file)}
+    names.update({t: known[t] for t in tickers if not names.get(t) and known.get(t)})
     need = [t for t in tickers if not names.get(t)]
     if need:
         if fetch_names is None:
             from watchlist import fetch_profiles
             fetch_names = lambda ts: {t: p.get("name") for t, p in fetch_profiles(ts).items()}  # noqa: E731
         names.update({t: n for t, n in fetch_names(need).items() if n})
+        missed = [t for t in need if not names.get(t)]
+        if missed:
+            time.sleep(RETRY_PAUSE)
+            for t in missed:
+                names.update({k: n for k, n in fetch_names([t]).items() if n})
+    save_names({**known, **{t: n for t, n in names.items() if n}}, names_file)
 
     stocks = []
     for t in tickers:
