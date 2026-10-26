@@ -1,5 +1,6 @@
 """Run with: python -m unittest test_watchlist -v
 Uses made-up prices, so it needs no network and spends nothing."""
+import html
 import json
 import os
 import random
@@ -304,6 +305,25 @@ class WatchlistTest(unittest.TestCase):
             saved_names = json.loads((port / "names.json").read_text(encoding="utf-8"))
             self.assertEqual((saved_names["NODATA"], saved_names["NEW"], saved_names["SOFI"]),
                              ("No Data Inc", "Second Try Inc", "SoFi"))
+
+    def test_names_file_names_every_card_without_yahoo(self):
+        # No reports and no earlier stock pages: the names file alone has to name every card.
+        with tempfile.TemporaryDirectory() as d:
+            port = Path(d)
+            (port / "reports").mkdir()
+            (port / "reports.html").write_text(f"<html><body><main>\n    <header>x\n{w_page.HEADER_END}"
+                                               f"{w_page.MAIN_END}</body></html>", encoding="utf-8")
+            tickers = ["AAPL", "MSFT", "ZD"]
+            w_page.save_names({"AAPL": "Apple Inc.", "MSFT": "Microsoft Corporation", "ZD": "Ziff Davis, Inc.",
+                               "OLD": "Dropped Inc"}, port / "names.json")
+            built = w_page.build(port, TODAY, prices={t: fake_candles(t) for t in tickers},
+                                 fetch_names=lambda ts: self.fail(f"asked Yahoo for {ts}"), watchlist=tickers,
+                                 scan={"date": TODAY, "groups": {}}, names_file=port / "names.json")
+            self.assertEqual(built["no_name"], [])
+            for t, name in [("AAPL", "Apple Inc."), ("ZD", "Ziff Davis, Inc.")]:
+                self.assertIn(f'<p class="name">{html.escape(name)}</p>',
+                              (port / "stocks" / f"{t}.html").read_text(encoding="utf-8"))
+            self.assertIn("OLD", w_page.load_names(port / "names.json"))   # off the watchlist, but kept
 
     def test_status_tag(self):
         self.assertEqual(w_page.status_tag(110, 100, 90, True), "At highs")
