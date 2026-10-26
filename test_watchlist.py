@@ -51,10 +51,10 @@ def perfect_metrics(**overrides):
 
 
 class WatchlistTest(unittest.TestCase):
-    def test_watchlist_file_has_38_unique_tickers(self):
+    def test_watchlist_file_has_66_unique_tickers(self):
         tickers = w.load_watchlist()
-        self.assertEqual(len(tickers), 38)
-        self.assertEqual(len(set(tickers)), 38)
+        self.assertEqual(len(tickers), 66)
+        self.assertEqual(len(set(tickers)), 66)
         for gone in ("APLS APP VRT CRCL CIFR HUT JOBY BBAI UPST AEHR KOD CAPR IVVD CRMD CGEM ORIC CRVO PCRX").split():
             self.assertNotIn(gone, tickers)
 
