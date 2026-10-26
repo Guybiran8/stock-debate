@@ -78,8 +78,8 @@ from zoneinfo import ZoneInfo
 import yfinance as yf
 
 from data import clean_name
-from chart import (AT_HIGHS, MAX_RISK, RISK_FLOOR_ATR, atr, find_levels,
-                   recent_swing_low, risk_level, sma, sma_series)
+from chart import (AT_HIGHS, MAX_CONTRACTION, MAX_RISK, RISK_FLOOR_ATR, atr, avg_range,
+                   find_levels, recent_swing_low, risk_level, sma, sma_series)
 
 ROOT = Path(__file__).parent
 WATCHLIST_FILE = ROOT / "watchlist.txt"
@@ -90,10 +90,9 @@ BENCHMARK = "SPY"
 MIN_HISTORY = 220            # 200-day average plus 20 days to measure its slope
 MIN_DOLLAR_VOLUME = 10e6     # $10M a day
 MIN_ROOM = 1.5
-MAX_CONTRACTION = 0.8
 EARNINGS_SOON_DAYS = 10
 BIG_MOVE = 0.15              # 15% in one day
-ATR_MULTIPLE = 2             # upside estimate at highs; AT_HIGHS, MAX_RISK and RISK_FLOOR_ATR come from chart.py
+ATR_MULTIPLE = 2             # upside estimate at highs; AT_HIGHS, MAX_RISK, RISK_FLOOR_ATR and MAX_CONTRACTION come from chart.py
 CATALYST_INDUSTRIES = ("biotechnology", "drug manufacturers", "pharmaceutical")
 
 GROUPS = ["Top candidates", "Watch closely", "Catalyst watch", "Reject"]
@@ -177,10 +176,6 @@ def _ret(closes, n):
     return closes[-1] / closes[-1 - n] - 1
 
 
-def _avg_range(daily, n):
-    return sum((c["h"] - c["l"]) / c["c"] for c in daily[-n:]) / n
-
-
 def compute_metrics(daily, spy):
     """All numbers come from the candles. Returns None if there is not enough data."""
     if len(daily) < MIN_HISTORY or len(spy) < 61:
@@ -235,7 +230,7 @@ def compute_metrics(daily, spy):
         "rs20": _ret(sc, 20) - _ret(bc, 20),
         "rs60": _ret(sc, 60) - _ret(bc, 60),
         "vol_ratio": daily[-1]["v"] / vol20 if vol20 else None,
-        "contraction": _avg_range(daily, 10) / _avg_range(daily, 50),
+        "contraction": avg_range(daily, 10) / avg_range(daily, 50),
         "support": sup, "support_label": sup_label, "to_support": to_sup,
         "resistance": res, "resistance_label": res_label, "to_resistance": to_res,
         "at_highs": at_highs, "high52": high52, "atr": day_range,

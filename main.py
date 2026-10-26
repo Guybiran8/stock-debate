@@ -12,7 +12,8 @@ from chart import CHART_GUIDE, get_chart
 from data import HOW_TO_READ, get_facts
 from debate import run_debate
 from hard_facts import get_hard_facts
-from judge import judge
+import setup_status
+from judge import company_lean, judge
 from report import build_page, page_html
 from research import PLANS, facts_text, research
 from scenarios import main_sentence, money_lines
@@ -74,8 +75,12 @@ def analyze(ticker, horizon, open_browser=True, fresh_research=False):
         chart, hard = pool.submit(_chart_and_hard_facts, ticker, today, plan, catalyst).result()
         facts, name, today = facts_job.result()
         found = research_job.result()
-    chart_text = chart["text"] if chart else "No chart data is available for this stock."
+    # The setup status is decided here, by code, before any AI sees the data.
+    setup = setup_status.evaluate(chart["daily"]) if chart else None
+    chart_text = (chart["text"] + "\n\n" + setup_status.text(setup)) if chart else "No chart data is available for this stock."
     nxt = hard["next_date"]
+    # Only an earnings report has a known average move; other events never force "too early".
+    event_move = hard["earnings"][0] if hard["earnings"] and nxt and nxt[0] == hard["earnings"][2] else None
     next_line = f"NEXT DATE THAT MATTERS: {nxt[0]:%b %d, %Y}, {nxt[1]}." if nxt else "NEXT DATE THAT MATTERS: none known."
     research_text = facts_text(hard["facts"] + found["facts"]) + (
         "\n\nWHAT TRADERS ARE SAYING ON X (opinions, not facts):\n" + found["x"] if found["x"] else "")
@@ -92,7 +97,10 @@ def analyze(ticker, horizon, open_browser=True, fresh_research=False):
     d = run_debate(data, horizon)
     print(f"3/5 Debate done ({timing.total():.0f}s)")
 
-    decision_brief, details_brief, _, _ = judge(data, d, horizon)
+    status = setup["status"] if setup else setup_status.NONE
+    table = setup_status.evidence_table(setup, nxt, event_move, today) if setup else "- Any lean: Too early to tell."
+    decision_brief, details_brief, _, _ = judge(data, d, horizon, status,
+                                                setup_status.text(setup) if setup else "No chart data.", table)
     print(f"4/5 Judges done ({timing.total():.0f}s)")
 
     # Every dollar sentence is written by code from templates (scenarios.py).
@@ -102,8 +110,15 @@ def analyze(ticker, horizon, open_browser=True, fresh_research=False):
     else:
         money_sentence, lines = "No chart data, so no dollar example.", []
 
+    lean = company_lean(decision_brief)
+    if setup:
+        evidence = setup_status.evidence(setup, lean, nxt, event_move, today)
+        changes = setup_status.changes(setup, nxt)
+    else:
+        evidence, changes = (setup_status.TOO_EARLY, f"No chart data. Company: {lean.lower()}."), []
     page = build_page(ticker, name, today, label, facts, chart_text, chart, found, d, decision_brief, details_brief,
-                      money_sentence, lines, hard["facts"], PLANS[plan]["topics"], research_text)
+                      money_sentence, lines, hard["facts"], PLANS[plan]["topics"], research_text,
+                      setup, evidence, changes)
 
     full_html = page_html(ticker, name, page)
     REPORT_FILE.write_text(full_html, encoding="utf-8")

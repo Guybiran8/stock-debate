@@ -9,6 +9,10 @@
   one rewrite. The rewrite is checked again and kept even if it still has problems, which are
   printed and returned.
 - tip_html(text): escapes text for HTML and adds a hover tooltip to the first use of each term.
+  A [plain explanation] in square brackets right after a term is dropped, since the tooltip explains it.
+  Number tags the judge writes after a number ([R] reported, [EC] estimate by the company,
+  [EA] estimate by analysts, [C] calculation) become small colored dots with the label on hover.
+  The checks above ignore the tags.
 """
 import html
 import re
@@ -94,6 +98,10 @@ TERMS = [
     ("S&P 500", r"S&P 500|\bSPY\b", "An index of 500 large U.S. companies, used as a stand-in for the whole stock market.", True),
     ("sector", r"\bsectors?\b", "A group of companies in the same line of business, like tech or health care.", True),
     ("interest rates", r"interest rates?|rate cuts?|rate hikes?|the Fed\b|Federal Reserve", "The cost of borrowing money, set mainly by the Federal Reserve (the U.S. central bank). Lower rates usually help stock prices.", True),
+    ("setup", r"\bsetups?\b", "A quiet pause just under a ceiling price: daily moves get smaller, dips stop higher and trading gets quieter. Breakouts often start from one.", False),
+    ("range tightening", r"range tightening|tightening range", "The stock's daily up-and-down moves are getting smaller than usual.", False),
+    ("higher lows", r"higher lows", "Each dip stops at a higher price than the one before, a sign buyers step in sooner.", False),
+    ("fail level", r"fail levels?", "The price where the chart idea is proven wrong. A close below it ends the setup.", False),
     ("bullish", r"\bbull(ish|s)?\b", "Expecting the price to go up.", False),
     ("bearish", r"\bbear(ish|s)?\b", "Expecting the price to go down.", False),
 ]
@@ -130,6 +138,42 @@ _PNL_RE = re.compile(r"[+−-]\s?\$\d[\d,.]*" + _BIG
 _PNL_CONTEXT = re.compile(r"\b(\d+ shares|you|your|position|investment|invested)\b", re.I)
 
 
+# Number tags: where a number comes from. Written by the judge, shown as colored dots.
+KINDS = {
+    "R": ("reported", "Reported fact: from a company filing, the company itself or market data."),
+    "EC": ("estimate-company", "Estimate (company): the company's own forecast. Often wrong."),
+    "EA": ("estimate-analysts", "Estimate (analysts): what bank analysts expect. Often wrong."),
+    "C": ("calc", "Calculation: worked out by code from prices or reported numbers."),
+}
+_KIND_RE = re.compile(r"\s?\[(R|EC|EA|C)\]")
+
+
+def strip_kinds(text):
+    return _KIND_RE.sub("", text)
+
+
+def _kind_dot(m):
+    cls, label = KINDS[m.group(1)]
+    tip = html.escape(label, quote=True)
+    return f"<span class='kind {cls}' tabindex='0' role='img' aria-label='{tip}' data-tip='{tip}'></span>"
+
+
+# The AI explains a term in square brackets right after it ("breakout [a move above a high price]"),
+# which the check above asks for. On the page the term has a hover tooltip, so the bracket goes.
+_BRACKET_AFTER = re.compile(r"(?:'s|’s)?(\s*\[(?!(R|EC|EA|C)\])[^\[\]\n]{3,200}\])")
+
+
+def drop_explained(text):
+    """Removes a [plain explanation] right after a glossary term (or its "'s"). Runs until nothing changes,
+    since "analyst [a person ...] targets [...]" only reads as the term "analyst targets" once the first goes."""
+    while True:
+        cuts = [b.span(1) for m in _TERM_RE.finditer(text) if (b := _BRACKET_AFTER.match(text, m.end()))]
+        if not cuts:
+            return text
+        for start, end in reversed(cuts):
+            text = text[:start] + text[end:]
+
+
 def first_uses(text):
     """[(key, start, end), ...] for the first use of each term, in order."""
     seen, out = set(), []
@@ -143,6 +187,7 @@ def first_uses(text):
 
 def unexplained(text):
     """Checked terms whose first use has no plain explanation right next to it."""
+    text = strip_kinds(text)
     return [key for key, start, end in first_uses(text)
             if key in CHECKED and not _AFTER.match(text[end:end + 60]) and not _BEFORE.search(text[max(0, start - 30):start])]
 
@@ -173,6 +218,7 @@ def money_sentences(text):
 
 def problems(text, extra=None):
     """List of plain-English problems to send back, empty if the text passes."""
+    text = strip_kinds(text)
     out = []
     terms = unexplained(text)
     if terms:
@@ -199,6 +245,7 @@ Keep every fact, number, date, price level, URL, heading and label exactly as it
 Keep the same layout: the same headings, the same lines starting with a dash, the same labels.
 Put each explanation right after the word it explains, inside its sentence. Never add a term and
 its explanation on their own after a sentence ends.
+Keep every number tag ([R], [EC], [EA] or [C]) right after the number it belongs to.
 Keep the token [MONEY] exactly as written and in the same place, if the text has it. Keep every
 required part of each section: shorten sentences, but do not cut what they cover.
 Do not add new facts. Do not remove facts except a sentence about dollars won or lost.
@@ -231,6 +278,10 @@ def fix(text, rewrite, label, extra_check=None, view=None):
     new = drop_dangling_terms((new or "").strip())
     if not new:
         return text, found
+    # A rewrite that drops number tags loses where each number comes from, so the first version stays.
+    if len(_KIND_RE.findall(new)) < len(_KIND_RE.findall(text)):
+        print(f"    {label}: the rewrite dropped number tags, keeping the first version")
+        return text, found
     left = check(new)
     print(f"    {label} after rewrite: grade {grade(view(new)):.1f}, "
           + ("passed" if not left else "still: " + " | ".join(p[:160] for p in left)))
@@ -241,6 +292,7 @@ def tip_html(text, seen=None):
     """HTML-escapes text and wraps the first use of each term in a hover tooltip.
     Pass the same seen set across blocks to tooltip a term only once in that run."""
     seen = set() if seen is None else seen
+    text = drop_explained(text)
     out, pos = [], 0
     for m in _TERM_RE.finditer(text):
         key = _KEY[m.lastgroup]
@@ -252,4 +304,4 @@ def tip_html(text, seen=None):
         out.append(f"<span class='tip' tabindex='0' data-tip='{tip}'>{html.escape(m.group(0))}</span>")
         pos = m.end()
     out.append(html.escape(text[pos:]))
-    return "".join(out)
+    return _KIND_RE.sub(_kind_dot, "".join(out))

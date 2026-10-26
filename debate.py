@@ -22,6 +22,9 @@ Write for someone who has never bought a stock. Use short sentences and common w
 brackets, for example "support (a price where buyers stepped in before)".
 Never work out how many dollars someone would win or lose. The report adds those itself.
 Price levels and percent moves are fine.
+The SETUP STATUS in PRICE CHART DATA is decided by code from the chart rules. Never argue about
+what the status is. Argue what it means and whether the company evidence backs it up.
+Never give the stock a rating or tell the reader to buy, sell, hold or watch it.
 Write in plain text with no markdown symbols.
 """
 
@@ -56,7 +59,8 @@ def run_debate(data, horizon):
     ask_bull, ask_bear = ASK[bull_key], ASK[bear_key]
     frame = (
         f"The reader is considering {HORIZONS[horizon]}. "
-        "Argue for that time frame and use the evidence that matters most for it."
+        "Argue for that time frame. Make at most 3 points about the company, the ones that matter most "
+        "for this stock and time frame, plus what the chart setup means."
     )
 
     def edit(ask):
@@ -74,13 +78,13 @@ def run_debate(data, horizon):
     with ThreadPoolExecutor(2) as pool:
         bull_job = pool.submit(
             speak, "bull case", ask_bull,
-            "You are a bull analyst. Make the strongest honest case FOR buying this stock, "
+            "You are a bull analyst. Make the strongest honest case FOR owning this stock, "
             "using the numbers, the chart data and the research. Max 230 words. " + frame,
             data,
         )
         bear_job = pool.submit(
             speak, "bear case", ask_bear,
-            "You are a bear analyst. Make the strongest honest case AGAINST buying this stock, "
+            "You are a bear analyst. Make the strongest honest case AGAINST owning this stock, "
             "using the numbers, the chart data and the research. Max 230 words. " + frame,
             data,
         )

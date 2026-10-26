@@ -43,10 +43,17 @@ LOSS = "n/a (a loss)"
 BAD_FORECAST = "n/a (Yahoo's forecast looks wrong)"
 
 
+# What kind of numbers each fact holds (wording.KINDS): R reported, EA estimate by analysts, C calculation.
+TOPIC_KINDS = {
+    "Upcoming events": ("EA", "C"), "Analyst changes": ("EA",), "Insider trades": ("R",),
+    "Short interest": ("R",), "Sector": ("C",), "Valuation": ("C", "EA"), "Cash and dilution": ("R", "C"),
+}
+
+
 def _fact(topic, fact, effect, when, day=None):
     # date is what the fact is about (it can be an upcoming event), so the report shows the pull date instead.
     return {"topic": topic, "fact": fact, "date": str(day) if day else "", "source": YAHOO,
-            "effect": effect, "when": when, "pulled": None}
+            "effect": effect, "when": when, "pulled": None, "kinds": TOPIC_KINDS.get(topic, ())}
 
 
 def _pct(x):

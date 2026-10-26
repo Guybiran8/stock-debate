@@ -52,11 +52,25 @@ def target_and_stop(chart):
     return up, up_label, down, down_label
 
 
-def main_sentence(chart, shares=SHARES):
+def scenario_tiles(chart):
+    """[(price, percent move, label), ...] for the up and down scenarios, plus the gain-per-$1-of-loss
+    ratio (None when either side is empty). Same prices as main_sentence."""
     price = chart["price"]
     up, up_label, down, down_label = target_and_stop(chart)
-    return (f"If you buy {shares} shares at {_d(price)} (about {_d(price * shares)} in total): about "
-            f"{_gain((up - price) * shares)} if it reaches {_d(up)} ({up_label}), and about "
+    ratio = (up - price) / (price - down) if price > down and up > price else None
+    return [(up, up / price - 1, "Up scenario: " + up_label),
+            (down, down / price - 1, "Down scenario: " + down_label)], ratio
+
+
+def main_sentence(chart, shares=SHARES, labels=False):
+    """The 10-share example. The chart lane shows it under the scenario tiles, which already say what
+    each price is, so only the full details (labels=True) repeat that."""
+    price = chart["price"]
+    up, up_label, down, down_label = target_and_stop(chart)
+    start = f"If you buy {shares} shares at {_d(price)} (about {_d(price * shares)} in total): "
+    if not labels:
+        return start + f"about {_gain((up - price) * shares)} at {_d(up)} and about {_gain((down - price) * shares)} at {_d(down)}."
+    return (start + f"about {_gain((up - price) * shares)} if it reaches {_d(up)} ({up_label}), and about "
             f"{_gain((down - price) * shares)} if it falls to {_d(down)} ({down_label}).")
 
 
@@ -64,7 +78,7 @@ def money_lines(chart, horizon, target=None, earnings=None, shares=SHARES):
     """The full money section. earnings is (average move, number of reports, next date or None)."""
     price, daily = chart["price"], chart["daily"]
     up, _, down, _ = target_and_stop(chart)
-    lines = [main_sentence(chart, shares)]
+    lines = [main_sentence(chart, shares, labels=True)]
     if price > down and up > price:
         lines.append(f"That is about {_d((up - price) / (price - down))} of possible gain for every $1 of possible loss "
                      "between those two prices.")

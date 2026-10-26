@@ -132,6 +132,7 @@ def find_levels(daily, price, window=5, tol=0.015):
 AT_HIGHS = 0.03          # within 3% of the 52-week high counts as "at highs"
 MAX_RISK = 0.15          # a support only counts as nearby if it is within 15% below price
 RISK_FLOOR_ATR = 1       # risk distance is never less than 1x the 14-day ATR
+MAX_CONTRACTION = 0.8    # 10-day average range / 50-day average range at or under this counts as tightening
 ATR_DAYS = 14
 SWING_WINDOW = 5
 
@@ -141,6 +142,25 @@ def atr(daily, n=ATR_DAYS):
     trs = [max(c["h"] - c["l"], abs(c["h"] - p["c"]), abs(c["l"] - p["c"]))
            for p, c in zip(daily[-n - 1:-1], daily[-n:])]
     return sum(trs) / len(trs)
+
+
+def avg_range(daily, n):
+    # Average daily high-to-low range over the last n days, as a share of the close.
+    return sum((c["h"] - c["l"]) / c["c"] for c in daily[-n:]) / n
+
+
+def swing_lows(daily, lookback=60, window=SWING_WINDOW):
+    # Days in the last lookback days whose low is the lowest of the window days on each side,
+    # oldest first, as (low, index into daily). A low needs window days after it to count.
+    start = max(window, len(daily) - lookback)
+    return [(daily[i]["l"], i) for i in range(start, len(daily) - window)
+            if daily[i]["l"] == min(c["l"] for c in daily[i - window:i + window + 1])]
+
+
+def volume_trend(daily, short=10, long=50):
+    # Average volume over the last short days divided by the last long days. Under 1 means quieter.
+    vol_long = sum(c["v"] for c in daily[-long:]) / long
+    return (sum(c["v"] for c in daily[-short:]) / short) / vol_long if vol_long else None
 
 
 def recent_swing_low(daily, price, window=SWING_WINDOW):
@@ -282,6 +302,9 @@ def get_chart(ticker, today):
         "at_highs": lv["at_highs"],
         "high52": high52,
         "low52": low52,
+        "support_text": support_text,
+        "resistance_text": resistance_text,
+        "volume_vs_20d": last_vol / vol20 if vol20 else None,
     }
 
 
