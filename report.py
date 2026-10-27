@@ -156,7 +156,7 @@ def chart_lane_html(ticker, chart, setup, explained, money_sentence, seen):
     levels = [
         ("Resistance", chart.get("resistance_text", "")),
         ("Support", chart.get("support_text", "")),
-        ("Chart idea fails", f"on a close below ${fail[0]:,.2f} ({fail[1]})" if fail else "no nearby level"),
+        ("Fail level now", f"a close below ${fail[0]:,.2f} ({fail[1]})" if fail else "no nearby level"),
         ("Volume", (f"latest day {vol:.2f} times its 20-day average" if vol else "n/a")
          + (f"; last 10 days {vol_trend:.2f} times the 50-day average" if vol_trend else "")),
     ]

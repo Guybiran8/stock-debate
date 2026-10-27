@@ -179,8 +179,11 @@ def reason(s):
                 f"on {b['volume']:.1f} times its normal volume, and is still above it.")
     if s["status"] == FAILED:
         f = s["failed"]
-        return (f"It was {'a confirmed breakout' if f['was'] == BREAKOUT else 'an early setup'} on {f['day']:%b %d}, "
-                f"and has since closed below that setup's fail level of {_d(f['fail'][0])}.")
+        if f["was"] == BREAKOUT:
+            return (f"It was a confirmed breakout on {f['day']:%b %d}, and has since closed back below "
+                    f"its breakout level of {_d(f['fail'][0])}, which ends a breakout.")
+        return (f"It was an early setup on {f['day']:%b %d}, and has since closed below "
+                f"the fail level that setup had then, {_d(f['fail'][0])}.")
     passed = sum(r[3] for r in s["rows"])
     if s["status"] == EARLY:
         return (f"{passed} of the 6 checks pass, including {s['tightening']} of the 3 tightening checks "

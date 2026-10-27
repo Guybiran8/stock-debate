@@ -518,7 +518,15 @@ class SetupStatus(unittest.TestCase):
     def test_failed_setup_names_the_level_it_broke(self):
         s = setup_status.evaluate(failed_setup())
         self.assertLess(s["price"], s["failed"]["fail"][0])
-        self.assertIn("has since closed below", s["reason"])
+        self.assertIn("has since closed", s["reason"])
+
+    def test_failed_setup_says_which_old_level_it_broke(self):
+        s = setup_status.evaluate(failed_setup())
+        s["failed"] = dict(s["failed"], was="Confirmed breakout", fail=(257.29, "resistance"))
+        self.assertIn("closed back below its breakout level of $257.29", setup_status.reason(s))
+        s["failed"]["was"] = "Early setup"
+        self.assertIn("below the fail level that setup had then, $257.29", setup_status.reason(s))
+        self.assertNotIn("that setup's fail level", setup_status.reason(s))
 
     def test_short_history_is_no_setup(self):
         s = setup_status.evaluate(early_setup()[-100:])
@@ -670,6 +678,8 @@ class Layout(unittest.TestCase):
     def test_code_status_and_evidence_are_shown(self):
         page = layout_page()
         self.assertIn("<div class='v status-none'>No setup</div>", page)
+        self.assertIn("<dt>Fail level now</dt><dd>a close below $", page)
+        self.assertNotIn("Chart idea fails", page)
         self.assertIn("<div class='v ev-early'>Too early to tell</div>", page)
         self.assertIn("<dt>TOGETHER</dt><dd><b>Too early to tell.</b></dd>", page)
         self.assertIn("What would change this", page)
