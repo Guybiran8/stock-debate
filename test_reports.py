@@ -711,6 +711,16 @@ class Layout(unittest.TestCase):
         bad = DECISION.replace("Link: The Oct 24", "Link: Too early to tell. Chart: no setup. Company: mixed. The Oct 24")
         self.assertTrue(any("Link:" in p for p in judge.decision_problems(bad, "No setup")))
 
+    def test_a_term_inside_a_url_does_not_cut_the_link(self):
+        # AMZN, Oct 25, 2026: "revenue" in a CNBC link got a tooltip, so the link stopped at "-results-".
+        url = "https://www.cnbctv18.com/market/amazon-q2-results-revenue-aws-growth-12345.htm"
+        fact = {"topic": "Business", "fact": f"Sales rose 20% ({url}) and revenue grew.", "effect": "Lifts it.",
+                "when": "Now.", "source": url}
+        out = report.facts_html([fact], [])
+        self.assertIn(f"href='{url}'", out)
+        self.assertNotIn("</a><span class='tip'", out)
+        self.assertEqual(out.count("data-tip='revenue:"), 1)   # the word after the link still gets its tooltip
+
     def test_bracket_explanations_go_where_a_tooltip_explains(self):
         out = wording.tip_html("The breakout [a move above a high price] failed. Analyst [a person who studies "
                                "companies] targets [the price they expect] lean high. Rate mood [how people feel] fell.")

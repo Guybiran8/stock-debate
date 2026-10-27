@@ -215,10 +215,18 @@ def _source_html(f):
     return " · ".join(bits)
 
 
-def _linked(html_text):
-    # Turns bare URLs in already-escaped text into links.
-    return re.sub(r"https?://[^\s<>()']+", lambda m: f"<a href='{m.group(0)}' target='_blank' rel='noopener'>"
-                  f"{re.sub(r'^https?://(www[.])?', '', m.group(0))[:40]}</a>", html_text)
+_URL = re.compile(r"(https?://[^\s<>()']+)")
+
+
+def _linked(text, seen):
+    """tip_html for text with bare URLs in it: the URLs become links, and only the words between them
+    get tooltips. A tooltip inside a URL ("...-results-revenue-...") would cut the link short."""
+    parts = _URL.split(text)
+    return "".join(
+        tip_html(part, seen) if i % 2 == 0 else
+        f"<a href='{html.escape(part, quote=True)}' target='_blank' rel='noopener'>"
+        f"{html.escape(re.sub(r'^https?://(www[.])?', '', part)[:40])}</a>"
+        for i, part in enumerate(parts))
 
 
 def facts_html(facts, topics):
@@ -236,8 +244,8 @@ def facts_html(facts, topics):
             if f.get("priced_in"):
                 rows.append(("Already in the price:", f["priced_in"]))
             sub = "".join(f"<div class='sub'><b>{lab}</b> "
-                          f"{_linked(tip_html(val, seen))}</div>" for lab, val in rows)
-            items.append(f"<li><span>{_linked(tip_html(f['fact'], seen))}</span>{sub}"
+                          f"{_linked(val, seen)}</div>" for lab, val in rows)
+            items.append(f"<li><span>{_linked(f['fact'], seen)}</span>{sub}"
                          f"<div class='source'>{_source_html(f)}</div></li>")
         out.append(f"<div class='topic'>{tip_html(topic)}</div>"
                    f"<ul class='facts'>{''.join(items)}</ul>")
