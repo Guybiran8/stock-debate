@@ -93,6 +93,7 @@ MIN_ROOM = 1.5
 EARNINGS_SOON_DAYS = 10
 BIG_MOVE = 0.15              # 15% in one day
 MOVE_NOTE = 0.03             # a day's move this big is named on the stock's reports-page card
+CARD_RULES = 2               # rules named on a card before "+N more"
 ATR_MULTIPLE = 2             # upside estimate at highs; AT_HIGHS, MAX_RISK, RISK_FLOOR_ATR and MAX_CONTRACTION come from chart.py
 CATALYST_INDUSTRIES = ("biotechnology", "drug manufacturers", "pharmaceutical")
 
@@ -316,7 +317,9 @@ def card_reason(r):
         parts.append(reason)
     if m.get("vol_ratio") and m["vol_ratio"] >= 1.5:
         parts.append(f"volume {m['vol_ratio']:.1f}x normal")
-    parts.append(("misses " if r["group"] == "Watch closely" else "") + "; ".join(r["why"]))
+    # The first CARD_RULES rules, then a count of the rest (the full list is on the watchlist page).
+    why = r["why"][:CARD_RULES] + ([f"+{len(r['why']) - CARD_RULES} more"] if len(r["why"]) > CARD_RULES else [])
+    parts.append(("misses " if r["group"] == "Watch closely" else "") + "; ".join(why))
     return " · ".join(parts)
 
 

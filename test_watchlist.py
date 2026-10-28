@@ -118,6 +118,10 @@ class WatchlistTest(unittest.TestCase):
         self.assertEqual(w.card_reason(older), "-20% one-day move in last 5 sessions · no verified catalyst date")
         watch = w.classify("X", perfect_metrics(contraction=1.2, change_1d=-0.04), tech, {}, TODAY)
         self.assertEqual(w.card_reason(watch), "-4% today · misses range not contracting (over 0.8)")
+        many = w.classify("X", perfect_metrics(contraction=1.2, rs20=-0.01, slope50=-0.01, change_1d=0), tech, {}, TODAY)
+        self.assertEqual(len(many["why"]), 3)
+        self.assertEqual(w.card_reason(many), "misses 50-day or 200-day not rising; not beating SPY over both 20 "
+                                              "and 60 days; +1 more")
 
     def test_daily_change_and_signed_move(self):
         daily = fake_candles("move")
