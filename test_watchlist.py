@@ -106,6 +106,26 @@ class WatchlistTest(unittest.TestCase):
         self.assertEqual(w.classify("X", perfect_metrics(price=85, sma20=88), tech, {}, TODAY)["group"], "Reject")
         # A big one-day move makes a stock catalyst-driven even outside biotech.
         self.assertEqual(w.tag_stock(perfect_metrics(max_move_5d=0.2), tech, TODAY)[0], "catalyst-driven")
+        self.assertIn("-20% one-day move", w.tag_stock(perfect_metrics(max_move_5d=0.2, move_5d=-0.2), tech, TODAY)[2][0])
+
+    def test_card_reason_says_why_with_direction(self):
+        tech = {"industry": "Semiconductors", "earnings": None, "earnings_estimate": None}
+        jump = w.classify("K", perfect_metrics(max_move_5d=0.23, move_5d=0.23, change_1d=0.23, vol_ratio=3.53),
+                          tech, {}, TODAY)
+        self.assertEqual(jump["group"], "Catalyst watch")
+        self.assertEqual(w.card_reason(jump), "+23% today · volume 3.5x normal · no verified catalyst date")
+        older = w.classify("K", perfect_metrics(max_move_5d=0.2, move_5d=-0.2, change_1d=0.01), tech, {}, TODAY)
+        self.assertEqual(w.card_reason(older), "-20% one-day move in last 5 sessions · no verified catalyst date")
+        watch = w.classify("X", perfect_metrics(contraction=1.2, change_1d=-0.04), tech, {}, TODAY)
+        self.assertEqual(w.card_reason(watch), "-4% today · misses range not contracting (over 0.8)")
+
+    def test_daily_change_and_signed_move(self):
+        daily = fake_candles("move")
+        daily[-1] = dict(daily[-1], c=daily[-2]["c"] * 0.8)
+        m = w.compute_metrics(daily, fake_candles("spy"))
+        self.assertAlmostEqual(m["change_1d"], -0.2)
+        self.assertAlmostEqual(m["move_5d"], -0.2)
+        self.assertAlmostEqual(m["max_move_5d"], 0.2)
 
     def test_at_highs_can_be_top_and_no_support_cannot(self):
         tech = {"industry": "Semiconductors", "earnings": None, "earnings_estimate": None}
@@ -326,6 +346,42 @@ class WatchlistTest(unittest.TestCase):
                               (port / "stocks" / f"{t}.html").read_text(encoding="utf-8"))
             self.assertIn("OLD", w_page.load_names(port / "names.json"))   # off the watchlist, but kept
 
+    def test_card_shows_its_reason_under_the_tags(self):
+        card = w_page.stock_card("KNSA", "Kiniksa", "At highs", None, "Catalyst watch", "+23% today · volume 3.5x normal")
+        self.assertIn('</div>\n          <div class="why">+23% today · volume 3.5x normal</div>\n          <div class="date">',
+                      card)
+        self.assertNotIn('class="why"', w_page.stock_card("KO", "Coca-Cola", "Uptrend", None, "Reject"))
+        page = w_page.grid_section([{"ticker": "KNSA", "name": "K", "tag": "At highs", "reports": []}],
+                                   {"date": TODAY, "groups": {"KNSA": "Catalyst watch"}, "reasons": {"KNSA": "+23% today"}})
+        self.assertIn('<div class="why">+23% today</div>', page)
+
+    def test_old_scan_files_without_reasons_still_load(self):
+        with tempfile.TemporaryDirectory() as d:
+            old = Path(d) / "old.json"
+            old.write_text(json.dumps({"date": "2026-10-26", "groups": {"KO": "Reject"}}), encoding="utf-8")
+            scan = w_page.load_scan(old)
+            self.assertEqual((scan["groups"], scan["reasons"]), ({"KO": "Reject"}, {}))
+            self.assertNotIn('class="why"', w_page.grid_section(
+                [{"ticker": "KO", "name": "Coca-Cola", "tag": "Uptrend", "reports": []}], scan))
+            new = Path(d) / "new.json"
+            w_page.save_scan(TODAY, {"KO": "Reject"}, path=new, reasons={"KO": "no uptrend"})
+            self.assertEqual(w_page.load_scan(new)["reasons"], {"KO": "no uptrend"})
+
+    def test_cut_off_yahoo_name_gives_way_to_the_full_one(self):
+        with tempfile.TemporaryDirectory() as d:
+            port = Path(d)
+            (port / "reports").mkdir()
+            (port / "reports.html").write_text(f"<html><body><main>\n    <header>x\n{w_page.HEADER_END}"
+                                               f"{w_page.MAIN_END}</body></html>", encoding="utf-8")
+            w_page.save_names({"KNSA": "Kiniksa Pharmaceuticals International, plc", "META": "Facebook, Inc."},
+                              port / "names.json")
+            w_page.build(port, TODAY, prices={t: fake_candles(t) for t in ["KNSA", "META"]},
+                         names={"KNSA": "Kiniksa Pharmaceuticals Interna", "META": "Meta Platforms, Inc."},
+                         watchlist=["KNSA", "META"], scan={"date": TODAY, "groups": {}}, names_file=port / "names.json")
+            page = (port / "reports.html").read_text(encoding="utf-8")
+            self.assertIn('<div class="name">Kiniksa Pharmaceuticals International, plc</div>', page)
+            self.assertIn('<div class="name">Meta Platforms, Inc.</div>', page)   # a renamed company keeps Yahoo's name
+
     def test_status_tag(self):
         self.assertEqual(w_page.status_tag(110, 100, 90, True), "At highs")
         self.assertEqual(w_page.status_tag(80, 90, 100, False), "Downtrend")
@@ -533,7 +589,7 @@ class WatchlistTest(unittest.TestCase):
                                     build_page=lambda *a: "page", REPORTS_DIR=Path(d),
                                     publish_to_portfolio=lambda *a, **k: list(copied),
                                     push_portfolio=lambda today: push_status, sync_portfolio=lambda: None), \
-                mock.patch.object(w_page, "save_scan", lambda *a: None), \
+                mock.patch.object(w_page, "save_scan", lambda *a, **k: None), \
                 mock.patch("builtins.print") as out:
             status = w.run(ran_reports=False)[3]
         return status, " ".join(str(c.args[0]) for c in out.call_args_list if c.args)

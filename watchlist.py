@@ -92,6 +92,7 @@ MIN_DOLLAR_VOLUME = 10e6     # $10M a day
 MIN_ROOM = 1.5
 EARNINGS_SOON_DAYS = 10
 BIG_MOVE = 0.15              # 15% in one day
+MOVE_NOTE = 0.03             # a day's move this big is named on the stock's reports-page card
 ATR_MULTIPLE = 2             # upside estimate at highs; AT_HIGHS, MAX_RISK, RISK_FLOOR_ATR and MAX_CONTRACTION come from chart.py
 CATALYST_INDUSTRIES = ("biotechnology", "drug manufacturers", "pharmaceutical")
 
@@ -238,6 +239,8 @@ def compute_metrics(daily, spy):
         "to_risk": to_risk, "risk_floored": risk_floored, "room": room,
         "dollar_volume": sum(c["c"] * c["v"] for c in daily[-20:]) / 20,
         "max_move_5d": max(abs(closes[i] / closes[i - 1] - 1) for i in range(len(closes) - 5, len(closes))),
+        "move_5d": max((closes[i] / closes[i - 1] - 1 for i in range(len(closes) - 5, len(closes))), key=abs),
+        "change_1d": price / closes[-2] - 1,
     }
 
 
@@ -251,7 +254,7 @@ def tag_stock(m, profile, today):
     if e and 0 <= (e - today).days <= EARNINGS_SOON_DAYS:
         reasons.append(f"earnings {e}")
     if m["max_move_5d"] >= BIG_MOVE:
-        reasons.append(f"{m['max_move_5d']:.0%} one-day move in last 5 sessions")
+        reasons.append(f"{m.get('move_5d', m['max_move_5d']):+.0%} one-day move in last 5 sessions")
     return ("catalyst-driven" if reasons else "technical-driven"), is_bio, reasons
 
 
@@ -299,6 +302,22 @@ def classify(ticker, m, profile, catalysts, today):
     if m["price"] > m["sma50"] > m["sma200"]:
         return {**base, "group": "Watch closely", "why": fails}
     return {**base, "group": "Reject", "why": ["no uptrend (needs price > 50-day > 200-day)"] + fails}
+
+
+def card_reason(r):
+    """One short line for the stock's card on reports.html: why it is in its group, from the scan's own numbers."""
+    m, parts = r["metrics"], []
+    day = m.get("change_1d")
+    if day is not None and abs(day) >= MOVE_NOTE:
+        parts.append(f"{day:+.0%} today")
+    for reason in r["tag_reasons"]:
+        if reason.endswith("in last 5 sessions") and day is not None and abs(day) >= BIG_MOVE:
+            continue   # the big move was today, already named above with its direction
+        parts.append(reason)
+    if m.get("vol_ratio") and m["vol_ratio"] >= 1.5:
+        parts.append(f"volume {m['vol_ratio']:.1f}x normal")
+    parts.append(("misses " if r["group"] == "Watch closely" else "") + "; ".join(r["why"]))
+    return " · ".join(parts)
 
 
 def score_all(tickers, prices, profiles, catalysts, today):
@@ -628,9 +647,10 @@ def run(ran_reports=True, runner=_run_full_report, push=True):
     names = {t: p.get("name") for t, p in profiles.items() if p.get("name")}
     import portfolio_page
     groups = {r["ticker"]: r["group"] for r in results}
-    portfolio_page.save_scan(today, groups)
+    reasons = {r["ticker"]: card_reason(r) for r in results}
+    portfolio_page.save_scan(today, groups, reasons=reasons)
     copied = publish_to_portfolio(out, [p for _, o, p in outcomes if p], today, prices=prices, names=names,
-                                  scan={"date": today, "groups": groups})
+                                  scan={"date": today, "groups": groups, "reasons": reasons})
     status = "skipped"
     if copied:
         print(f"Copied to portfolio: {', '.join(copied)}")
