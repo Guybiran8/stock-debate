@@ -66,6 +66,7 @@ Levels and averages reuse chart.py, so they match the full reports.
 import csv
 import html
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -92,8 +93,6 @@ MIN_DOLLAR_VOLUME = 10e6     # $10M a day
 MIN_ROOM = 1.5
 EARNINGS_SOON_DAYS = 10
 BIG_MOVE = 0.15              # 15% in one day
-MOVE_NOTE = 0.03             # a day's move this big is named on the stock's reports-page card
-CARD_RULES = 2               # rules named on a card before "+N more"
 ATR_MULTIPLE = 2             # upside estimate at highs; AT_HIGHS, MAX_RISK, RISK_FLOOR_ATR and MAX_CONTRACTION come from chart.py
 CATALYST_INDUSTRIES = ("biotechnology", "drug manufacturers", "pharmaceutical")
 
@@ -305,22 +304,106 @@ def classify(ticker, m, profile, catalysts, today):
     return {**base, "group": "Reject", "why": ["no uptrend (needs price > 50-day > 200-day)"] + fails}
 
 
+# Plain words for each Top rule a stock can miss, keyed by the start of top_failures' text.
+PLAIN_MISS = [
+    ("averages not stacked", "the price and its averages aren't lined up yet"),
+    ("50-day or 200-day not rising", "the longer averages aren't rising yet"),
+    ("not beating SPY", "weaker than the market lately"),
+    ("no nearby support", "no nearby floor to measure the risk from"),
+    ("room to move", "not enough room up to the next ceiling"),
+    ("range not contracting", "price swings aren't tightening yet"),
+]
+
+
+def _plain_miss(why):
+    return next((plain for key, plain in PLAIN_MISS if why.startswith(key)), why)
+
+
 def card_reason(r):
-    """One short line for the stock's card on reports.html: why it is in its group, from the scan's own numbers."""
-    m, parts = r["metrics"], []
+    """One short plain line for the stock's card on reports.html: the main reason it is in its group.
+    Wording only: the group itself comes from classify."""
+    m, group, why = r["metrics"], r["group"], r["why"]
     day = m.get("change_1d")
-    if day is not None and abs(day) >= MOVE_NOTE:
-        parts.append(f"{day:+.0%} today")
-    for reason in r["tag_reasons"]:
-        if reason.endswith("in last 5 sessions") and day is not None and abs(day) >= BIG_MOVE:
-            continue   # the big move was today, already named above with its direction
-        parts.append(reason)
-    if m.get("vol_ratio") and m["vol_ratio"] >= 1.5:
-        parts.append(f"volume {m['vol_ratio']:.1f}x normal")
-    # The first CARD_RULES rules, then a count of the rest (the full list is on the watchlist page).
-    why = r["why"][:CARD_RULES] + ([f"+{len(r['why']) - CARD_RULES} more"] if len(r["why"]) > CARD_RULES else [])
-    parts.append(("misses " if r["group"] == "Watch closely" else "") + "; ".join(why))
-    return " · ".join(parts)
+    if group == "Top candidates":
+        return "Passes every check"
+    if group == "Reject":
+        if why[0].startswith("dollar volume"):
+            return "Too few shares trade each day"
+        return "Not in an uptrend"
+    if group == "Catalyst watch" and why == ["no verified catalyst date"]:
+        if day is not None and abs(day) >= BIG_MOVE:
+            lead = f"{'Up' if day > 0 else 'Down'} {abs(day):.0%} today"
+        elif m["max_move_5d"] >= BIG_MOVE:
+            lead = "Big move this week"
+        elif any(t.startswith("industry") for t in r["tag_reasons"]):
+            lead = "Drug or biotech stock"
+        else:
+            lead = "Moves on news"
+        return f"{lead}, no confirmed news date"
+    first = _plain_miss(why[0])
+    if group == "Catalyst watch":
+        when = re.match(r"earnings (\d{4}-\d{2}-\d{2})", r["catalyst"] or "")
+        if when:
+            d = date.fromisoformat(when.group(1))
+            return f"Earnings {d:%b} {d.day}, but {first}"
+        return f"News date ahead, but {first}"
+    if len(why) == 1:
+        return f"Close, but {first}"
+    return first[0].upper() + first[1:]
+
+
+def _usd(x):
+    return f"${x:,.2f}"
+
+
+def scan_checks(r):
+    """Every rule the scan checked for this stock, in plain words, with its number and cutoff:
+    [(passed, title, sentence), ...]. The same numbers and cutoffs classify used; nothing here changes a result."""
+    m = r["metrics"]
+    rows = [(m["dollar_volume"] >= MIN_DOLLAR_VOLUME,
+             "Trades enough" if m["dollar_volume"] >= MIN_DOLLAR_VOLUME else "Doesn't trade enough",
+             f"about ${m['dollar_volume'] / 1e6:,.0f}M of shares change hands a day (20-day average); "
+             f"the list needs at least ${MIN_DOLLAR_VOLUME / 1e6:,.0f}M.")]
+    if r["tag"] == "catalyst-driven":
+        moves_on = "; ".join(r["tag_reasons"])
+        if r["catalyst"]:
+            rows.append((True, "Confirmed news date",
+                         f"it moves on news ({moves_on}), and the next event has a confirmed date: {r['catalyst']}."))
+        else:
+            rows.append((False, "No confirmed news date",
+                         f"it moves on news ({moves_on}), but the next event has no confirmed date, "
+                         "so it stays on Catalyst watch until it does."))
+    up = m["price"] > m["sma50"] > m["sma200"]
+    rows.append((up, "In an uptrend" if up else "Not in an uptrend",
+                 f"price {_usd(m['price'])}, 50-day average {_usd(m['sma50'])}, 200-day average {_usd(m['sma200'])}; "
+                 "it needs the price above the 50-day and the 50-day above the 200-day."))
+    stacked = m["price"] > m["sma20"] > m["sma50"] > m["sma200"]
+    rows.append((stacked, "Averages lined up" if stacked else "Averages not lined up",
+                 f"price {_usd(m['price'])}, 20-day {_usd(m['sma20'])}, 50-day {_usd(m['sma50'])}, "
+                 f"200-day {_usd(m['sma200'])}; a setup needs each one above the next."))
+    rising = m["slope50"] > 0 and m["slope200"] > 0
+    rows.append((rising, "Longer averages rising" if rising else "Longer averages not rising",
+                 f"the 50-day average moved {m['slope50']:+.1%} in 10 days and the 200-day {m['slope200']:+.1%} "
+                 "in 20 days; both need to be above 0%."))
+    beats = m["rs20"] > 0 and m["rs60"] > 0
+    rows.append((beats, "Beating the market" if beats else "Weaker than the market",
+                 f"{m['rs20']:+.1%} vs SPY over 20 days and {m['rs60']:+.1%} over 60 days; both need to be above 0%."))
+    if m["risk"] is None:
+        rows.append((False, "No nearby floor",
+                     f"there is no support level within {MAX_RISK:.0%} below the price, so the risk can't be measured."))
+    else:
+        rows.append((True, "Nearby floor",
+                     f"the nearest floor is {_usd(m['risk'])} ({m['risk_label']}), {m['to_risk']:.1%} below; "
+                     f"it needs to be within {MAX_RISK:.0%}."))
+        room = m["room"] is not None and m["room"] >= MIN_ROOM
+        rows.append((room, "Room to move" if room else "Not enough room to move",
+                     f"the next ceiling ({_usd(m['resistance'])}) is {m['room'] or 0:.1f} times as far as the floor; "
+                     f"a setup needs {MIN_ROOM} or more."))
+    tight = m["contraction"] <= MAX_CONTRACTION
+    rows.append((tight, "Price swings tightening" if tight else "Price swings aren't tightening",
+                 f"the recent range is {m['contraction']:.2f} of the earlier range (10-day vs 50-day average daily "
+                 f"range); a setup needs {MAX_CONTRACTION} or less."))
+    return rows
 
 
 def score_all(tickers, prices, profiles, catalysts, today):
@@ -651,9 +734,10 @@ def run(ran_reports=True, runner=_run_full_report, push=True):
     import portfolio_page
     groups = {r["ticker"]: r["group"] for r in results}
     reasons = {r["ticker"]: card_reason(r) for r in results}
-    portfolio_page.save_scan(today, groups, reasons=reasons)
+    checks = {r["ticker"]: scan_checks(r) for r in results}
+    portfolio_page.save_scan(today, groups, reasons=reasons, checks=checks)
     copied = publish_to_portfolio(out, [p for _, o, p in outcomes if p], today, prices=prices, names=names,
-                                  scan={"date": today, "groups": groups, "reasons": reasons})
+                                  scan={"date": today, "groups": groups, "reasons": reasons, "checks": checks})
     status = "skipped"
     if copied:
         print(f"Copied to portfolio: {', '.join(copied)}")

@@ -344,12 +344,13 @@ def grid_section(stocks, scan, picked=None):
     )
 
 
-def save_scan(scan_date, groups, path=None, reasons=None):
-    """Remembers today's groups and each card's one-line reason so the page can be rebuilt on its own later."""
+def save_scan(scan_date, groups, path=None, reasons=None, checks=None):
+    """Remembers today's groups, each card's one-line reason and each stock's checked rules
+    ({ticker: [(passed, title, sentence), ...]}) so the pages can be rebuilt on their own later."""
     path = path or LATEST_SCAN
     Path(path).parent.mkdir(exist_ok=True)
-    Path(path).write_text(json.dumps({"date": scan_date.isoformat(), "groups": groups, "reasons": reasons or {}},
-                                     indent=1), encoding="utf-8")
+    Path(path).write_text(json.dumps({"date": scan_date.isoformat(), "groups": groups, "reasons": reasons or {},
+                                      "checks": checks or {}}, indent=1), encoding="utf-8")
 
 
 def load_scan(path=None):
@@ -357,8 +358,27 @@ def load_scan(path=None):
     if not Path(path).exists():
         return None
     data = json.loads(Path(path).read_text(encoding="utf-8"))
-    # Files saved before the reasons were added only have groups.
-    return {"date": date.fromisoformat(data["date"]), "groups": data["groups"], "reasons": data.get("reasons", {})}
+    # Older files only have groups, or groups and reasons.
+    return {"date": date.fromisoformat(data["date"]), "groups": data["groups"], "reasons": data.get("reasons", {}),
+            "checks": data.get("checks", {})}
+
+
+def why_section(ticker, scan):
+    """The 'Why it's on this list' panel for a stock page, from the saved scan; empty if the scan has no checks."""
+    checks = ((scan or {}).get("checks") or {}).get(ticker)
+    if not checks:
+        return ""
+    d, group = scan["date"], scan["groups"].get(ticker, "")
+    reason = ((scan.get("reasons") or {}).get(ticker) or "")
+    rows = "".join(
+        f'        <li><span class="mark" role="img" aria-label="{"Pass" if ok else "Fail"}">{"✅" if ok else "❌"}</span> '
+        f'<span><b>{html.escape(title)}:</b> {html.escape(text)}</span></li>\n' for ok, title, text in checks)
+    return (
+        '    <section class="panel why-list">\n      <h2>Why it\'s on this list</h2>\n'
+        f'      <p class="why-lead">Scan of {d:%b} {d.day}: <b>{html.escape(group)}</b>'
+        + (f'. {html.escape(reason)}.' if reason else '.') + '</p>\n'
+        '      <ul class="checks">\n' + rows + '      </ul>\n    </section>\n'
+    )
 
 
 # ---------- stocks/TICKER.html ----------
@@ -373,6 +393,10 @@ STOCK_STYLE = """  <style>
     .panel { background: var(--surface); border: 1px solid var(--border); border-radius: 12px; padding: 20px; margin: 16px 0; }
     .panel h2 { font-size: 0.8rem; font-weight: 700; letter-spacing: 0.06em; text-transform: uppercase; color: var(--muted); margin: 0 0 10px; }
     .chart { width: 100%; height: 340px; }
+    .why-lead { margin: 0 0 12px; }
+    .checks { list-style: none; margin: 0; padding: 0; display: grid; gap: 10px; }
+    .checks li { display: flex; gap: 10px; align-items: baseline; line-height: 1.5; }
+    .checks .mark { flex: none; }
     .legend { display: flex; flex-wrap: wrap; gap: 4px 14px; margin-top: 6px; font-size: 0.8rem; color: var(--muted); }
     .swatch { display: inline-block; width: 14px; height: 3px; margin-right: 5px; vertical-align: middle; border-radius: 2px; }
     .swatch.ma20 { background: #a259d9; }
@@ -462,7 +486,7 @@ def site_chrome(reports_page):
     return (_one_level_up(nav.group(0)) if nav else "", _one_level_up(footer.group(0)) if footer else "", site)
 
 
-def stock_page(stock, today, chrome):
+def stock_page(stock, today, chrome, scan=None):
     nav, footer, site = chrome
     ticker, name, chart, reports = stock["ticker"], stock["name"], stock["chart"], stock["reports"]
     title = f"{ticker} · {site}" if site else ticker
@@ -504,7 +528,8 @@ def stock_page(stock, today, chrome):
         f'      <p class="name">{html.escape(name)}</p>\n'
         f'      <div class="tag">{html.escape(stock["tag"])}</div>\n'
         '    </header>\n'
-        '    <section class="panel">\n      <h2>Chart today (updated daily)</h2>\n' + chart_html + '    </section>\n'
+        + why_section(ticker, scan)
+        + '    <section class="panel">\n      <h2>Chart today (updated daily)</h2>\n' + chart_html + '    </section>\n'
         '    <section class="panel">\n      <h2>Latest AI report</h2>\n' + latest + '    </section>\n'
         '    <section class="panel">\n      <h2>Older reports</h2>\n' + older_html + '    </section>\n'
         '  </main>\n\n'
@@ -581,7 +606,7 @@ def build(portfolio=PORTFOLIO_DIR, today=None, prices=None, names=None, download
     keep = set()
     for s in stocks:
         f = stocks_dir / f"{s['ticker']}.html"
-        f.write_text(stock_page(s, today, chrome), encoding="utf-8", newline="")
+        f.write_text(stock_page(s, today, chrome, scan), encoding="utf-8", newline="")
         keep.add(f.name)
     for old in stocks_dir.glob("*.html"):
         if old.name not in keep:

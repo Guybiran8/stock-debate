@@ -108,20 +108,52 @@ class WatchlistTest(unittest.TestCase):
         self.assertEqual(w.tag_stock(perfect_metrics(max_move_5d=0.2), tech, TODAY)[0], "catalyst-driven")
         self.assertIn("-20% one-day move", w.tag_stock(perfect_metrics(max_move_5d=0.2, move_5d=-0.2), tech, TODAY)[2][0])
 
-    def test_card_reason_says_why_with_direction(self):
+    def test_card_reason_is_one_plain_line(self):
         tech = {"industry": "Semiconductors", "earnings": None, "earnings_estimate": None}
+        bio = {"industry": "Biotechnology", "earnings": None, "earnings_estimate": None}
         jump = w.classify("K", perfect_metrics(max_move_5d=0.23, move_5d=0.23, change_1d=0.23, vol_ratio=3.53),
                           tech, {}, TODAY)
         self.assertEqual(jump["group"], "Catalyst watch")
-        self.assertEqual(w.card_reason(jump), "+23% today · volume 3.5x normal · no verified catalyst date")
+        self.assertEqual(w.card_reason(jump), "Up 23% today, no confirmed news date")
         older = w.classify("K", perfect_metrics(max_move_5d=0.2, move_5d=-0.2, change_1d=0.01), tech, {}, TODAY)
-        self.assertEqual(w.card_reason(older), "-20% one-day move in last 5 sessions · no verified catalyst date")
-        watch = w.classify("X", perfect_metrics(contraction=1.2, change_1d=-0.04), tech, {}, TODAY)
-        self.assertEqual(w.card_reason(watch), "-4% today · misses range not contracting (over 0.8)")
-        many = w.classify("X", perfect_metrics(contraction=1.2, rs20=-0.01, slope50=-0.01, change_1d=0), tech, {}, TODAY)
-        self.assertEqual(len(many["why"]), 3)
-        self.assertEqual(w.card_reason(many), "misses 50-day or 200-day not rising; not beating SPY over both 20 "
-                                              "and 60 days; +1 more")
+        self.assertEqual(w.card_reason(older), "Big move this week, no confirmed news date")
+        self.assertEqual(w.card_reason(w.classify("B", perfect_metrics(), bio, {}, TODAY)),
+                         "Drug or biotech stock, no confirmed news date")
+        watch = w.classify("X", perfect_metrics(contraction=1.2), tech, {}, TODAY)
+        self.assertEqual(w.card_reason(watch), "Close, but price swings aren't tightening yet")
+        many = w.classify("X", perfect_metrics(contraction=1.2, rs20=-0.01), tech, {}, TODAY)
+        self.assertEqual(w.card_reason(many), "Weaker than the market lately")
+        soon = {"industry": "Software", "earnings": TODAY + timedelta(days=3), "earnings_estimate": False}
+        earn = w.classify("E", perfect_metrics(contraction=1.2), soon, {}, TODAY)
+        self.assertEqual(earn["group"], "Catalyst watch")
+        d = TODAY + timedelta(days=3)
+        self.assertEqual(w.card_reason(earn), f"Earnings {d:%b} {d.day}, but price swings aren't tightening yet")
+        self.assertEqual(w.card_reason(w.classify("X", perfect_metrics(), tech, {}, TODAY)), "Passes every check")
+        self.assertEqual(w.card_reason(w.classify("X", perfect_metrics(dollar_volume=1e6), tech, {}, TODAY)),
+                         "Too few shares trade each day")
+        self.assertEqual(w.card_reason(w.classify("X", perfect_metrics(price=85, sma20=88), tech, {}, TODAY)),
+                         "Not in an uptrend")
+
+    def test_scan_checks_list_every_rule_with_number_and_cutoff(self):
+        tech = {"industry": "Semiconductors", "earnings": None, "earnings_estimate": None}
+        r = w.classify("X", perfect_metrics(contraction=0.92), tech, {}, TODAY)
+        checks = w.scan_checks(r)
+        titles = [t for _, t, _ in checks]
+        self.assertEqual(titles, ["Trades enough", "In an uptrend", "Averages lined up", "Longer averages rising",
+                                  "Beating the market", "Nearby floor", "Room to move", "Price swings aren't tightening"])
+        self.assertEqual(checks[-1], (False, "Price swings aren't tightening",
+                                      "the recent range is 0.92 of the earlier range (10-day vs 50-day average daily "
+                                      "range); a setup needs 0.8 or less."))
+        # The checks agree with the group: every Top rule passes only for a Top candidate.
+        top = w.classify("X", perfect_metrics(), tech, {}, TODAY)
+        self.assertEqual(top["group"], "Top candidates")
+        self.assertTrue(all(ok for ok, _, _ in w.scan_checks(top)))
+        self.assertEqual(sum(not ok for ok, _, _ in checks), len(r["why"]))
+        jump = w.classify("K", perfect_metrics(max_move_5d=0.23, move_5d=0.23, change_1d=0.23), tech, {}, TODAY)
+        self.assertEqual(w.scan_checks(jump)[1][:2], (False, "No confirmed news date"))
+        none = w.scan_checks(w.classify("X", perfect_metrics(risk=None, to_risk=None, room=None), tech, {}, TODAY))
+        self.assertIn((False, "No nearby floor"), [c[:2] for c in none])
+        self.assertNotIn("Room to move", [c[1] for c in none])
 
     def test_daily_change_and_signed_move(self):
         daily = fake_candles("move")
@@ -367,9 +399,28 @@ class WatchlistTest(unittest.TestCase):
             self.assertEqual((scan["groups"], scan["reasons"]), ({"KO": "Reject"}, {}))
             self.assertNotIn('class="why"', w_page.grid_section(
                 [{"ticker": "KO", "name": "Coca-Cola", "tag": "Uptrend", "reports": []}], scan))
+            self.assertEqual(scan["checks"], {})
+            self.assertEqual(w_page.why_section("KO", scan), "")      # no checks saved: no panel
             new = Path(d) / "new.json"
-            w_page.save_scan(TODAY, {"KO": "Reject"}, path=new, reasons={"KO": "no uptrend"})
-            self.assertEqual(w_page.load_scan(new)["reasons"], {"KO": "no uptrend"})
+            w_page.save_scan(TODAY, {"KO": "Reject"}, path=new, reasons={"KO": "Not in an uptrend"},
+                             checks={"KO": [(False, "Not in an uptrend", "price $1.00 ...")]})
+            saved = w_page.load_scan(new)
+            self.assertEqual(saved["reasons"], {"KO": "Not in an uptrend"})
+            self.assertEqual(saved["checks"], {"KO": [[False, "Not in an uptrend", "price $1.00 ..."]]})
+
+    def test_stock_page_shows_why_it_is_on_the_list(self):
+        scan = {"date": TODAY, "groups": {"BWLP": "Watch closely"}, "reasons": {"BWLP": "Close, but x"},
+                "checks": {"BWLP": [[True, "Trades enough", "about $50M a day; the list needs at least $10M."],
+                                    [False, "Price swings aren't tightening", "the recent range is 0.92 ..."]]}}
+        stock = {"ticker": "BWLP", "name": "BW LPG Limited", "chart": None, "tag": "Uptrend", "reports": []}
+        page = w_page.stock_page(stock, TODAY, ("", "", "Guy Biran"), scan)
+        panel = page[page.index('<section class="panel why-list">'):]
+        self.assertLess(page.index("why-list"), page.index("Chart today"))      # near the top
+        self.assertIn("<h2>Why it's on this list</h2>", panel)
+        self.assertIn("Scan of Oct 15: <b>Watch closely</b>. Close, but x.", panel)
+        self.assertIn('aria-label="Pass">✅</span> <span><b>Trades enough:</b> about $50M a day', panel)
+        self.assertIn('aria-label="Fail">❌</span> <span><b>Price swings aren&#x27;t tightening:</b> the recent', panel)
+        self.assertNotIn("why-list", w_page.stock_page(stock, TODAY, ("", "", "Guy Biran"), None))
 
     def test_cut_off_yahoo_name_gives_way_to_the_full_one(self):
         with tempfile.TemporaryDirectory() as d:
