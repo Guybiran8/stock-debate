@@ -23,26 +23,21 @@ REPORT_FILE = Path(__file__).parent / "report.html"
 REPORTS_DIR = Path(__file__).parent / "reports"
 
 
-def timed(label, fn, *args):
-    with step(label):
-        return fn(*args)
-
-
 def stock_plan(ticker, horizon, today):
     """Picks the research plan: long, or for a short-term trade the watchlist's own tag
     (catalyst-driven or technical-driven). Needs only Yahoo's profile and the last few closes,
     so the research can start before the chart and hard facts are done.
     Returns (plan, verified catalyst text for Grok, (date, what) for the next-date line, name)."""
     import watchlist as w
-    profile = w._profile(ticker)
+    profile = w.load_profiles([ticker])[0][ticker]     # falls back to the saved industry if Yahoo refuses
     c = w.load_catalysts(today=today).get(ticker)
     catalyst_text, catalyst = (f"{c['date']} {c['event']} ({c['source']})", (c["date"], c["event"])) if c else (None, None)
     if horizon == "long":
-        return "long", catalyst_text, catalyst, profile["name"]
+        return "long", catalyst_text, catalyst, profile.get("name")
     closes = list(yf.Ticker(ticker).history(period="10d")["Close"])
     moves = [abs(b / a - 1) for a, b in zip(closes[-6:], closes[-5:])]
     tag, _, _ = w.tag_stock({"max_move_5d": max(moves) if moves else 0}, profile, today)
-    return ("catalyst" if tag == "catalyst-driven" else "technical"), catalyst_text, catalyst, profile["name"]
+    return ("catalyst" if tag == "catalyst-driven" else "technical"), catalyst_text, catalyst, profile.get("name")
 
 
 def _chart_and_hard_facts(ticker, today, plan, catalyst):
@@ -63,17 +58,18 @@ def analyze(ticker, horizon, open_browser=True, fresh_research=False):
     print(f"Working on {ticker} ({label}).\n")
     timing.reset()
 
-    today = datetime.now(ZoneInfo("America/Los_Angeles")).date()
+    # The Yahoo numbers come first: if Yahoo refuses, the report stops here, before any paid AI call.
+    with step("numbers (Yahoo)"):
+        facts, facts_name, today = get_facts(ticker)
     with step("pick research plan"):
         plan, catalyst_text, catalyst, name = stock_plan(ticker, horizon, today)
+    name = facts_name or name
     print(f"1/5 Research plan: {plan}")
 
-    # The numbers, the chart and hard facts, and the Grok research do not depend on each other.
-    with ThreadPoolExecutor(3) as pool:
+    # The chart and hard facts and the Grok research do not depend on each other.
+    with ThreadPoolExecutor(2) as pool:
         research_job = pool.submit(research, ticker, name, today, horizon, plan, catalyst_text, fresh_research)
-        facts_job = pool.submit(timed, "numbers (Yahoo)", get_facts, ticker)
         chart, hard = pool.submit(_chart_and_hard_facts, ticker, today, plan, catalyst).result()
-        facts, name, today = facts_job.result()
         found = research_job.result()
     # The setup status is decided here, by code, before any AI sees the data.
     setup = setup_status.evaluate(chart["daily"]) if chart else None

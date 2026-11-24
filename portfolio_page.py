@@ -48,22 +48,54 @@ LIB = "https://unpkg.com/lightweight-charts@4.2.0/dist/lightweight-charts.standa
 # {n} is the number of stocks on the watchlist, filled in at each build so it never goes stale.
 LEAD = ("These are {n} stocks I picked. Click any one to follow its chart and reports, "
         "so it's easier to understand what the stock is doing.")
-# Company names from earlier builds (on the VPS, not in git), so a day Yahoo refuses requests keeps them.
+# Company names, industries and sectors from earlier runs (on the VPS, not in git), so a day Yahoo refuses
+# requests keeps them. The watchlist scan saves and reads the industries (watchlist.load_profiles).
 NAMES_FILE = Path.home() / ".local/state/stock-debate/company-names.json"
 RETRY_PAUSE = 10        # seconds before asking Yahoo again for the names it missed
 CUT_OFF_NAME = 28       # a Yahoo short name this long may have been cut off
 
 
-def load_names(path=NAMES_FILE):
+def _read_cache(path):
+    # {ticker: {"name", "industry", "sector"}}. Older files hold {ticker: name}; those read as {"name": name}.
     try:
-        return json.loads(Path(path).read_text(encoding="utf-8"))
+        raw = json.loads(Path(path).read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return {}
+    if not isinstance(raw, dict):
+        return {}
+    return {t: (dict(v) if isinstance(v, dict) else {"name": v}) for t, v in raw.items() if isinstance(v, (str, dict))}
+
+
+def _write_cache(entries, path):
+    Path(path).parent.mkdir(parents=True, exist_ok=True)
+    Path(path).write_text(json.dumps(dict(sorted(entries.items())), indent=1), encoding="utf-8")
+
+
+def load_names(path=NAMES_FILE):
+    return {t: e["name"] for t, e in _read_cache(path).items() if e.get("name")}
 
 
 def save_names(names, path=NAMES_FILE):
-    Path(path).parent.mkdir(parents=True, exist_ok=True)
-    Path(path).write_text(json.dumps(dict(sorted(names.items())), indent=1), encoding="utf-8")
+    # Merges into the file, so the saved industries and sectors stay.
+    entries = _read_cache(path)
+    for t, n in names.items():
+        entries.setdefault(t, {})["name"] = n
+    _write_cache(entries, path)
+
+
+def load_details(path=NAMES_FILE):
+    """{ticker: {"industry", "sector"}} for every stock Yahoo has described before. The industry can be None:
+    Yahoo answered but lists none (NIQ, for example)."""
+    return {t: {"industry": e.get("industry"), "sector": e.get("sector")}
+            for t, e in _read_cache(path).items() if "industry" in e}
+
+
+def save_details(details, path=NAMES_FILE):
+    """details is {ticker: {"industry", "sector"}} from Yahoo answers that came back today."""
+    entries = _read_cache(path)
+    for t, d in details.items():
+        entries.setdefault(t, {}).update(industry=d.get("industry"), sector=d.get("sector"))
+    _write_cache(entries, path)
 
 
 def page_names(stocks_dir):

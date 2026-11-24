@@ -61,7 +61,8 @@ def get_facts(ticker):
     stock = yf.Ticker(ticker)
     info = stock.info
     if not info or info.get("marketCap") is None:
-        raise ValueError(f"No data found for {ticker}. Check the ticker and try again.")
+        raise ValueError(f"No data found for {ticker}: Yahoo sent no company numbers (a wrong ticker, or "
+                         "Yahoo refusing requests). Stopped before any AI call.")
 
     cap = info.get("marketCap")
     fcf = trailing_fcf(stock)

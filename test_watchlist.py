@@ -359,7 +359,7 @@ class WatchlistTest(unittest.TestCase):
                                      watchlist=["SOFI", "NVDA", "NODATA", "NEW"], names_file=port / "names.json")
             self.assertEqual(built["no_name"], [])
             self.assertEqual(tries, [["NEW"], ["NEW"]])     # SOFI and NODATA came from the last build's pages
-            saved_names = json.loads((port / "names.json").read_text(encoding="utf-8"))
+            saved_names = w_page.load_names(port / "names.json")
             self.assertEqual((saved_names["NODATA"], saved_names["NEW"], saved_names["SOFI"]),
                              ("No Data Inc", "Second Try Inc", "SoFi"))
 
@@ -639,7 +639,7 @@ class WatchlistTest(unittest.TestCase):
     def _run_with(self, push_status, copied=("reports.html",)):
         with tempfile.TemporaryDirectory() as d, \
                 mock.patch.multiple(w, load_watchlist=lambda: [], download_prices=lambda t: {},
-                                    fetch_profiles=lambda t: {}, score_all=lambda *a: ([], []),
+                                    load_profiles=lambda t: ({}, []), score_all=lambda *a: ([], []),
                                     load_catalysts=lambda **k: {}, auto_reports=lambda *a: [],
                                     build_page=lambda *a: "page", REPORTS_DIR=Path(d),
                                     publish_to_portfolio=lambda *a, **k: list(copied),
@@ -671,6 +671,120 @@ class WatchlistTest(unittest.TestCase):
             self.assertEqual(list(w.load_catalysts(f.name, today=TODAY)), ["AAA"])
         finally:
             os.unlink(f.name)
+
+
+class YahooProfileTest(unittest.TestCase):
+    """Yahoo refusing profiles (Nov 23, 2026: KNSA, a drug maker, read as technical and reached Top)."""
+    DRUG = {"industry": "Drug Manufacturers - Specialty & Generic", "sector": "Healthcare", "earnings": None,
+            "earnings_estimate": None, "name": "Kiniksa", "source": "yahoo"}
+    REFUSED = {"industry": None, "sector": None, "earnings": None, "earnings_estimate": None, "name": None,
+               "source": None}
+
+    def test_refused_or_empty_profile_is_catalyst_watch_never_technical(self):
+        for profile in ({}, dict(self.REFUSED)):
+            r = w.classify("KNSA", perfect_metrics(), profile, {}, TODAY)
+            self.assertEqual((r["group"], r["tag"], r["why"]), ("Catalyst watch", "unknown", ["Yahoo profile unavailable"]))
+            self.assertEqual(w.card_reason(r), "Yahoo sent no company details today")
+            rows = w.scan_checks(r)
+            self.assertIn((False, "No company details"), [(ok, title) for ok, title, _ in rows])
+        # Too little trading is still Reject first.
+        self.assertEqual(w.classify("X", perfect_metrics(dollar_volume=1e6), {}, {}, TODAY)["group"], "Reject")
+        # Yahoo answered but lists no industry (NIQ): judged on the chart as before.
+        niq = {**self.REFUSED, "source": "yahoo", "name": "NIQ"}
+        self.assertEqual(w.classify("NIQ", perfect_metrics(), niq, {}, TODAY)["group"], "Top candidates")
+        # A saved drug-maker industry keeps it out of Top without a verified catalyst.
+        saved = {**self.REFUSED, "industry": self.DRUG["industry"], "source": "saved"}
+        r = w.classify("KNSA", perfect_metrics(), saved, {}, TODAY)
+        self.assertEqual((r["tag"], r["group"]), ("catalyst-driven", "Catalyst watch"))
+
+    def test_profile_source(self):
+        with mock.patch.object(w.yf, "Ticker") as t:
+            t.return_value.info = {"trailingPegRatio": None}         # what a refused request returns
+            self.assertIsNone(w._profile("KNSA")["source"])
+            t.return_value.info = {"quoteType": "EQUITY", "industry": "Biotechnology", "sector": "Healthcare"}
+            p = w._profile("KNSA")
+            self.assertEqual((p["source"], p["industry"], p["sector"]), ("yahoo", "Biotechnology", "Healthcare"))
+            t.side_effect = RuntimeError("401")
+            self.assertIsNone(w._profile("KNSA")["source"])
+
+    def test_load_profiles_retries_then_uses_the_saved_industry(self):
+        with tempfile.TemporaryDirectory() as d:
+            cache = Path(d) / "names.json"
+            cache.write_text(json.dumps({"KNSA": "Kiniksa Pharmaceuticals International, plc", "BILL": "BILL"}))
+            w_page.save_details({"KNSA": self.DRUG}, cache)
+            calls, pauses = [], []
+
+            def fetch(ts):                      # AAA answers; KNSA and BILL are refused twice; CCC on the retry
+                calls.append(list(ts))
+                return {t: (dict(self.DRUG, industry="Software") if t == "AAA" or (t == "CCC" and len(calls) > 1)
+                            else dict(self.REFUSED)) for t in ts}
+
+            with mock.patch("builtins.print"):
+                profiles, refused = w.load_profiles(["AAA", "KNSA", "BILL", "CCC"], fetch=fetch,
+                                                    sleep=pauses.append, cache_file=cache)
+            self.assertEqual(calls, [["AAA", "KNSA", "BILL", "CCC"], ["KNSA", "BILL", "CCC"]])
+            self.assertEqual(pauses, [60])
+            self.assertEqual(refused, ["KNSA", "BILL"])
+            self.assertEqual((profiles["KNSA"]["source"], profiles["KNSA"]["industry"]), ("saved", self.DRUG["industry"]))
+            self.assertTrue(w.profile_unavailable(profiles["BILL"]))         # refused and nothing saved
+            self.assertEqual(profiles["CCC"]["source"], "yahoo")
+            # Today's answers are saved next to the names, which stay.
+            self.assertEqual(w_page.load_details(cache)["AAA"], {"industry": "Software", "sector": "Healthcare"})
+            self.assertEqual(w_page.load_names(cache)["KNSA"], "Kiniksa Pharmaceuticals International, plc")
+            self.assertNotIn("BILL", w_page.load_details(cache))
+            # Saving names later keeps the industries.
+            w_page.save_names({"AAA": "Triple A"}, cache)
+            self.assertEqual(w_page.load_details(cache)["KNSA"]["industry"], self.DRUG["industry"])
+            self.assertEqual(w_page.load_names(cache)["AAA"], "Triple A")
+
+            pauses.clear()
+            with mock.patch("builtins.print"):
+                w.load_profiles(["AAA"], fetch=fetch, sleep=pauses.append, cache_file=cache)
+            self.assertEqual(pauses, [])                                     # nothing refused, no wait
+
+    def _run(self, outcomes, refused, push_status="pushed"):
+        sent = []
+        with tempfile.TemporaryDirectory() as d, \
+                mock.patch.multiple(w, load_watchlist=lambda: [f"T{i}" for i in range(10)],
+                                    download_prices=lambda t: {}, load_profiles=lambda t: ({}, refused),
+                                    score_all=lambda *a: ([], []), load_catalysts=lambda **k: {},
+                                    auto_reports=lambda *a: outcomes, build_page=lambda *a: "page",
+                                    auto_section=lambda *a: "", REPORTS_DIR=Path(d),
+                                    publish_to_portfolio=lambda *a, **k: ["reports.html"],
+                                    push_portfolio=lambda today: push_status, sync_portfolio=lambda: None), \
+                mock.patch.object(w_page, "save_scan", lambda *a, **k: None), \
+                mock.patch("builtins.print") as out:
+            w.run(alert=sent.append)
+        return sent, " ".join(str(c.args[0]) for c in out.call_args_list if c.args)
+
+    def test_failed_report_or_many_refused_profiles_alert(self):
+        failed = [({"ticker": "KNSA"}, "report failed: ValueError: No data found for KNSA", None)]
+        sent, printed = self._run(failed, [])
+        self.assertIn("FAILED: full report KNSA report failed: ValueError", printed)
+        self.assertEqual(len(sent), 1)
+        self.assertIn("KNSA", sent[0])
+        sent, printed = self._run([], ["T1", "T2", "T3"])                   # 3 of 10 is over 20%
+        self.assertIn("FAILED: Yahoo refused 3 of 10 profiles", printed)
+        self.assertEqual(len(sent), 1)
+        sent, printed = self._run([({"ticker": "AAA"}, "report run", "r.html")], ["T1", "T2"])   # 2 of 10: fine
+        self.assertEqual(sent, [])
+        self.assertNotIn("FAILED", printed)
+        # The push failed too: scan_check.py's alert carries the FAILED lines, so no second message.
+        sent, printed = self._run(failed, [], push_status="push failed")
+        self.assertEqual(sent, [])
+        self.assertIn("FAILED: full report KNSA", printed)
+
+    def test_report_stops_before_any_ai_call_when_yahoo_sends_nothing(self):
+        import main
+        research = mock.Mock()
+        with mock.patch.object(main, "get_facts", side_effect=ValueError("No data found for KNSA")), \
+                mock.patch.object(main, "research", research), \
+                mock.patch.object(main, "stock_plan", mock.Mock()) as plan, \
+                mock.patch("builtins.print"):
+            with self.assertRaises(ValueError):
+                main.analyze("KNSA", "short", open_browser=False)
+        research.assert_not_called()
+        plan.assert_not_called()
 
 
 class ScanCheckTest(unittest.TestCase):

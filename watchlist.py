@@ -14,9 +14,17 @@ WHAT COUNTS AS A VERIFIED CATALYST DATE
   not mark as an estimate also counts. For biotech and drug makers it does not, because
   their big moves come from trial results and FDA decisions, which Yahoo does not list.
 
+YAHOO PROFILES (industry, sector, earnings date, name)
+- Profiles Yahoo refuses are asked for once more after PROFILE_RETRY_PAUSE (60) seconds.
+- Still refused: the industry and sector saved in the names file (portfolio_page.NAMES_FILE) from an
+  earlier answer are used. That copy has no earnings date. Every industry Yahoo sends is saved there.
+- Still nothing: the stock's profile is unavailable (step 3 below).
+
 HOW EACH STOCK IS GROUPED (checked in this order)
 1. Skipped: missing data or fewer than MIN_HISTORY trading days. Reported, never scored.
 2. Reject: average daily dollar volume (20 days) under MIN_DOLLAR_VOLUME.
+2b. Profile unavailable (Yahoo refused twice, no saved copy): Catalyst watch, "Yahoo profile unavailable".
+   Without the industry the scan can't rule out a drug maker, so it is never treated as technical.
 3. Catalyst-driven with no verified catalyst date: Catalyst watch. Never Top.
 4. Top candidates: passes every one of these:
      a. price > 20-day > 50-day > 200-day average
@@ -37,6 +45,11 @@ AUTO REPORTS
   fails, and the count is kept in reports/auto-reports-YYYY-MM-DD.txt. A stock already run
   today is not run again. With 0 Top candidates nothing runs, and the page says so.
 - Run "python watchlist.py --no-reports" for the free scan only.
+
+ALERTS
+- A full report that fails, or Yahoo refusing more than MAX_PROFILE_FAILS (20%) of the profiles after the
+  retry, prints a FAILED line and sends a Telegram alert (scan_check.send_telegram). When the push also
+  failed, scan_check.py's own alert carries these FAILED lines instead, so only one message goes out.
 
 PUBLISHING
 - Each run pulls ../portfolio (rebase) first, copies the watchlist page and new reports into it,
@@ -70,6 +83,7 @@ import re
 import shutil
 import subprocess
 import sys
+import time
 from concurrent.futures import ThreadPoolExecutor
 from datetime import date, datetime, timezone
 from datetime import time as dtime
@@ -97,6 +111,10 @@ ATR_MULTIPLE = 2             # upside estimate at highs; AT_HIGHS, MAX_RISK, RIS
 CATALYST_INDUSTRIES = ("biotechnology", "drug manufacturers", "pharmaceutical")
 
 GROUPS = ["Top candidates", "Watch closely", "Catalyst watch", "Reject"]
+
+PROFILE_UNAVAILABLE = "Yahoo profile unavailable"
+PROFILE_RETRY_PAUSE = 60     # seconds before asking Yahoo again for the profiles it refused
+MAX_PROFILE_FAILS = 0.2      # alert when Yahoo refuses more than this share of profiles after the retry
 
 MAX_AUTO_REPORTS = 2
 PORTFOLIO_DIR = ROOT.parent / "portfolio"
@@ -152,25 +170,60 @@ def download_prices(tickers):
 
 
 def _profile(ticker):
+    """Yahoo's profile. "source" is "yahoo" when Yahoo answered and None when it refused or sent nothing
+    (a refused request comes back as an almost empty dict, without quoteType)."""
     try:
         info = yf.Ticker(ticker).info or {}
     except Exception:
-        return {"industry": None, "earnings": None, "earnings_estimate": None, "name": None}
+        info = {}
+    if not info.get("quoteType"):
+        return {"industry": None, "sector": None, "earnings": None, "earnings_estimate": None, "name": None,
+                "source": None}
     now = datetime.now(timezone.utc).timestamp()
     stamps = [info.get("earningsTimestampStart"), info.get("earningsTimestamp")]
     future = [s for s in stamps if s and s > now]
     earnings = datetime.fromtimestamp(min(future), timezone.utc).date() if future else None
     return {
         "industry": info.get("industry"),
+        "sector": info.get("sector"),
         "earnings": earnings,
         "earnings_estimate": info.get("isEarningsDateEstimate") if earnings else None,
         "name": clean_name(info.get("shortName") or info.get("longName")),
+        "source": "yahoo",
     }
 
 
 def fetch_profiles(tickers):
     with ThreadPoolExecutor(max_workers=8) as pool:
         return dict(zip(tickers, pool.map(_profile, tickers)))
+
+
+def load_profiles(tickers, fetch=None, sleep=time.sleep, cache_file=None, pause=PROFILE_RETRY_PAUSE):
+    """Yahoo profiles, with one retry after `pause` seconds for the stocks Yahoo refused, then the saved
+    industry and sector (source "saved") for any still refused. Every industry Yahoo sends is saved to the
+    names file. A saved profile has no earnings date. Returns (profiles, refused): refused lists the stocks
+    Yahoo refused on both tries, saved copy or not."""
+    import portfolio_page
+    fetch = fetch or fetch_profiles
+    cache_file = cache_file or portfolio_page.NAMES_FILE
+    profiles = {t: {} for t in tickers}
+    profiles.update(fetch(tickers))
+    missed = [t for t in tickers if profiles[t].get("source") != "yahoo"]
+    if missed:
+        print(f"Yahoo refused {len(missed)} of {len(tickers)} profiles; trying them again in {pause}s.")
+        sleep(pause)
+        profiles.update(fetch(missed))
+    refused = [t for t in tickers if profiles[t].get("source") != "yahoo"]
+    saved = portfolio_page.load_details(cache_file)
+    for t in refused:
+        if t in saved:
+            profiles[t] = {**profiles[t], **saved[t], "source": "saved"}
+    portfolio_page.save_details({t: p for t, p in profiles.items() if p.get("source") == "yahoo"}, cache_file)
+    if refused:
+        used = sum(1 for t in refused if profiles[t].get("source") == "saved")
+        print(f"Yahoo profiles: {len(tickers) - len(refused)} of {len(tickers)} loaded; {used} of the "
+              f"{len(refused)} refused use the saved industry, {len(refused) - used} are unavailable.")
+    return profiles, refused
 
 
 def _ret(closes, n):
@@ -284,6 +337,12 @@ def top_failures(m):
     return fails
 
 
+def profile_unavailable(profile):
+    # Yahoo refused (or sent nothing) and there is no saved copy. A profile Yahoo answered without an
+    # industry (NIQ) is not unavailable.
+    return not profile.get("industry") and profile.get("source") not in ("yahoo", "saved")
+
+
 def classify(ticker, m, profile, catalysts, today):
     tag, is_bio, tag_reasons = tag_stock(m, profile, today)
     catalyst = verified_catalyst(ticker, is_bio, profile, catalysts) if tag == "catalyst-driven" else None
@@ -292,6 +351,9 @@ def classify(ticker, m, profile, catalysts, today):
 
     if m["dollar_volume"] < MIN_DOLLAR_VOLUME:
         return {**base, "group": "Reject", "why": [f"dollar volume under ${MIN_DOLLAR_VOLUME / 1e6:.0f}M a day"]}
+    if profile_unavailable(profile):
+        # Without the industry the scan can't tell a drug maker from a chip maker, so it never calls it technical.
+        return {**base, "tag": "unknown", "group": "Catalyst watch", "why": [PROFILE_UNAVAILABLE]}
     if tag == "catalyst-driven" and not catalyst:
         return {**base, "group": "Catalyst watch", "why": ["no verified catalyst date"]}
     fails = top_failures(m)
@@ -330,6 +392,8 @@ def card_reason(r):
         if why[0].startswith("dollar volume"):
             return "Too few shares trade each day"
         return "Not in an uptrend"
+    if why == [PROFILE_UNAVAILABLE]:
+        return "Yahoo sent no company details today"
     if group == "Catalyst watch" and why == ["no verified catalyst date"]:
         if day is not None and abs(day) >= BIG_MOVE:
             lead = f"{'Up' if day > 0 else 'Down'} {abs(day):.0%} today"
@@ -364,7 +428,11 @@ def scan_checks(r):
              "Trades enough" if m["dollar_volume"] >= MIN_DOLLAR_VOLUME else "Doesn't trade enough",
              f"about ${m['dollar_volume'] / 1e6:,.0f}M of shares change hands a day (20-day average); "
              f"the list needs at least ${MIN_DOLLAR_VOLUME / 1e6:,.0f}M.")]
-    if r["tag"] == "catalyst-driven":
+    if r["why"] == [PROFILE_UNAVAILABLE]:
+        rows.append((False, "No company details",
+                     "Yahoo didn't send its industry today and there is no saved copy, so the scan can't tell "
+                     "whether it moves on news. It stays on Catalyst watch until Yahoo answers."))
+    elif r["tag"] == "catalyst-driven":
         moves_on = "; ".join(r["tag_reasons"])
         if r["catalyst"]:
             rows.append((True, "Confirmed news date",
@@ -697,7 +765,25 @@ def push_portfolio(today, portfolio=PORTFOLIO_DIR, secrets=None, push=_git_push,
     return "pushed"
 
 
-def run(ran_reports=True, runner=_run_full_report, push=True):
+def run_problems(tickers, refused, outcomes):
+    """The FAILED lines for this run, without the "FAILED: " prefix: full reports that failed, and Yahoo
+    refusing more than MAX_PROFILE_FAILS of the profiles after the retry."""
+    out = []
+    if tickers and len(refused) > MAX_PROFILE_FAILS * len(tickers):
+        out.append(f"Yahoo refused {len(refused)} of {len(tickers)} profiles even after a retry "
+                   f"(over {MAX_PROFILE_FAILS:.0%}); the saved industries were used where there was one.")
+    for r, outcome, _ in outcomes:
+        if outcome.startswith("report failed"):
+            out.append(f"full report {r['ticker']} {outcome}")
+    return out
+
+
+def _send_alert(text):
+    from scan_check import send_telegram
+    return send_telegram(text)
+
+
+def run(ran_reports=True, runner=_run_full_report, push=True, alert=_send_alert):
     """Returns (results, skipped, outcomes, push status). The status is "pushed", "no changes", "skipped"
     (--no-push) or why the push didn't happen."""
     today = datetime.now(ZoneInfo("America/Los_Angeles")).date()
@@ -706,7 +792,7 @@ def run(ran_reports=True, runner=_run_full_report, push=True):
     tickers = load_watchlist()
     print(f"Scanning {len(tickers)} tickers...")
     prices = download_prices(tickers)
-    profiles = fetch_profiles(tickers)
+    profiles, refused = load_profiles(tickers)
     results, skipped = score_all(tickers, prices, profiles, load_catalysts(today=today), today)
 
     for g in GROUPS:
@@ -745,6 +831,13 @@ def run(ran_reports=True, runner=_run_full_report, push=True):
         status = push_portfolio(today) if copied else "not published"
         if status not in ("pushed", "no changes"):
             print(f"FAILED: the portfolio was not pushed ({status}). The live site still shows the last pushed scan.")
+    problems = run_problems(tickers, refused, outcomes)
+    for p in problems:
+        print(f"FAILED: {p}")
+    # A failed push makes scan_check.py send an alert that already carries these FAILED lines.
+    if problems and status in ("pushed", "no changes", "skipped"):
+        alert(f"Stock-debate daily scan {today:%b} {today.day}: the page was published, but\n"
+              + "\n".join(f"- {p}" for p in problems) + "\nLog: /root/.local/state/stock-debate/scan.log")
     return results, skipped, outcomes, status
 
 
